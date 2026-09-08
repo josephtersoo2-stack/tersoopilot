@@ -1,0 +1,654 @@
+# Implementation Plan: Mobile Anti-Detect Browser (GeckoView Engine)
+
+**System Target:** Native Android (Kotlin)
+
+**Primary Engine:** Mozilla GeckoView (Standalone Engine)
+
+**Target Trust Score:** $\ge 90\%$ on CreepJS, 100% "Reliable" on Iphey & Pixelscan
+
+**Agent Directive:** Follow every architectural rule, directory hierarchy, and code implementation strictly. Do not substitute GeckoView with Android System WebView. Do not use generic random math jitter for fingerprint evasion.
+
+---
+
+## 1. Architectural Blueprint & Anti-Detect Principles
+
+### Core Anti-Detection Rules
+
+1. **Engine-Identity Alignment:** All profiles MUST report an authentic Mobile Firefox on Android User-Agent. Never spoof Blink/Chrome on Gecko. SpiderMonkey engine execution quirks, error stack formatting, and CSS capabilities will immediately trigger high-severity "Engine Discrepancy" flags on CreepJS if a Chrome UA is declared.
+2. **Native C++ Protection via RFP:** Canvas, AudioContext, and high-precision system timers must be managed via Firefox's internal `privacy.resistFingerprinting` (RFP) engine rather than userland JavaScript overrides. RFP handles farbling in native C++ without detectable prototype patches.
+3. **Strict Profile Sandboxing:** Every profile receives a dedicated filesystem root directory. Cookies, IndexedDB, local storage, HTTP cache, and session tokens must never cross profile boundaries.
+4. **Pre-Execution Script Injection:** When dynamic overrides (such as hardware concurrency or screen properties) are applied, they must be injected via an internal WebExtension running at `run_at: "document_start"`. Never rely on late-running runtime injection.
+
+---
+
+## 2. Dependency & Build Configuration
+
+### File: `settings.gradle`
+
+Add Mozilla's dedicated Maven repository:
+
+```groovy
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        maven {
+            url "https://maven.mozilla.org/maven2/"
+        }
+    }
+}
+rootProject.name = "MultiBrowserAntiDetect"
+include ':app'
+
+```
+
+### File: `app/build.gradle`
+
+Configure native ABI targets and import GeckoView:
+
+```groovy
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.multibrowser.antidetect'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.multibrowser.antidetect"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        
+        ndk {
+            abiFilters "arm64-v8a", "armeabi-v7a"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+    buildFeatures {
+        viewBinding true
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
+
+    // Mozilla GeckoView Engine
+    implementation "org.mozilla.geckoview:geckoview:154.0.20260824154132"
+}
+
+```
+
+### File: `app/src/main/AndroidManifest.xml`
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="MultiBrowser"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+        
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>
+
+```
+
+---
+
+## 3. Data Models & Pre-Engineered Profiles
+
+### File: `app/src/main/java/com/multibrowser/antidetect/models/BrowserProfile.kt`
+
+```kotlin
+package com.multibrowser.antidetect.models
+
+data class BrowserProfile(
+    val id: String,
+    val name: String,
+    val userAgent: String,
+    val hardwareConcurrency: Int,
+    val deviceMemory: Int,
+    val screenWidth: Int,
+    val screenHeight: Int,
+    val devicePixelRatio: Double,
+    val webGlVendor: String,
+    val webGlRenderer: String
+)
+
+object ProfilePresets {
+    val SAMSUNG_A54 = BrowserProfile(
+        id = "profile_samsung_a54",
+        name = "Samsung Galaxy A54 (Android 14)",
+        userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+        hardwareConcurrency = 8,
+        deviceMemory = 8,
+        screenWidth = 412,
+        screenHeight = 915,
+        devicePixelRatio = 2.625,
+        webGlVendor = "ARM",
+        webGlRenderer = "Mali-G68 MP5"
+    )
+
+    val PIXEL_8A = BrowserProfile(
+        id = "profile_pixel_8a",
+        name = "Google Pixel 8a (Android 14)",
+        userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+        hardwareConcurrency = 9,
+        deviceMemory = 8,
+        screenWidth = 412,
+        screenHeight = 915,
+        devicePixelRatio = 2.625,
+        webGlVendor = "ARM",
+        webGlRenderer = "Mali-G715"
+    )
+
+    val TECNO_CAMON_30 = BrowserProfile(
+        id = "profile_tecno_camon30",
+        name = "Tecno Camon 30 Pro (Android 14)",
+        userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+        hardwareConcurrency = 8,
+        deviceMemory = 12,
+        screenWidth = 393,
+        screenHeight = 873,
+        devicePixelRatio = 2.75,
+        webGlVendor = "ARM",
+        webGlRenderer = "Mali-G610 MC6"
+    )
+}
+
+```
+
+---
+
+## 4. Built-in WebExtension for Script Isolation
+
+This extension runs internally at `document_start` before web pages can inspect the runtime environment.
+
+### File: `app/src/main/assets/extensions/antidetect/manifest.json`
+
+```json
+{
+  "manifest_version": 2,
+  "name": "AntiDetectCore",
+  "version": "1.0",
+  "permissions": [
+    "<all_urls>",
+    "nativeMessaging",
+    "geckoViewAddons"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ]
+}
+
+```
+
+### File: `app/src/main/assets/extensions/antidetect/background.js`
+
+```javascript
+let activeProfileConfig = null;
+
+// Connect to Kotlin via native messaging
+const port = browser.runtime.connectNative("antidetect_bridge");
+
+port.onMessage.addListener((message) => {
+  if (message.action === "APPLY_PROFILE") {
+    activeProfileConfig = message.payload;
+  }
+});
+
+browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.type === "FETCH_CONFIG") {
+    sendResponse({ config: activeProfileConfig });
+  }
+  return true;
+});
+
+```
+
+### File: `app/src/main/assets/extensions/antidetect/content.js`
+
+```javascript
+(() => {
+  'use strict';
+
+  browser.runtime.sendMessage({ type: "FETCH_CONFIG" }, (response) => {
+    if (!response || !response.config) return;
+    const cfg = response.config;
+
+    // Inject override payload into the page context
+    const code = `
+      (() => {
+        'use strict';
+        const nativeToString = Function.prototype.toString;
+        const registry = new WeakMap();
+
+        function wrapNative(fn, name) {
+          registry.set(fn, 'function ' + name + '() { [native code] }');
+          return fn;
+        }
+
+        Function.prototype.toString = new Proxy(nativeToString, {
+          apply(target, thisArg, args) {
+            if (registry.has(thisArg)) {
+              return registry.get(thisArg);
+            }
+            return Reflect.apply(target, thisArg, args);
+          }
+        });
+        wrapNative(Function.prototype.toString, 'toString');
+
+        // Navigator hardware concurrency override
+        const origHC = Object.getOwnPropertyDescriptor(Navigator.prototype, 'hardwareConcurrency');
+        if (origHC) {
+          Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', {
+            get: wrapNative(() => ${cfg.hardwareConcurrency}, 'get hardwareConcurrency'),
+            enumerable: true,
+            configurable: true
+          });
+        }
+
+        // WebGL vendor and renderer unmasking
+        const hookWebGL = (proto) => {
+          if (!proto) return;
+          const origGetParam = proto.prototype.getParameter;
+          proto.prototype.getParameter = wrapNative(function(param) {
+            if (param === 0x9245) return '${cfg.webGlVendor}';
+            if (param === 0x9246) return '${cfg.webGlRenderer}';
+            return origGetParam.call(this, param);
+          }, 'getParameter');
+        };
+
+        if (window.WebGLRenderingContext) hookWebGL(WebGLRenderingContext);
+        if (window.WebGL2RenderingContext) hookWebGL(WebGL2RenderingContext);
+      })();
+    `;
+
+    const scriptEl = document.createElement('script');
+    scriptEl.textContent = code;
+    (document.head || document.documentElement).appendChild(scriptEl);
+    scriptEl.remove(); // Clean DOM to leave no traces
+  });
+})();
+
+```
+
+---
+
+## 5. GeckoView Profile & Runtime Management
+
+### File: `app/src/main/java/com/multibrowser/antidetect/engine/GeckoProfileManager.kt`
+
+```kotlin
+package com.multibrowser.antidetect.engine
+
+import android.content.Context
+import com.multibrowser.antidetect.models.BrowserProfile
+import org.json.JSONObject
+import org.mozilla.geckoview.GeckoRuntime
+import org.mozilla.geckoview.GeckoRuntimeSettings
+import org.mozilla.geckoview.GeckoSession
+import org.mozilla.geckoview.GeckoSessionSettings
+import org.mozilla.geckoview.WebExtension
+import java.io.File
+import java.io.FileWriter
+
+class GeckoProfileManager(private val context: Context) {
+
+    private var runtime: GeckoRuntime? = null
+    private var nativePort: WebExtension.Port? = null
+
+    fun initializeProfile(profile: BrowserProfile): Pair<GeckoRuntime, GeckoSession> {
+        val profileDir = File(context.filesDir, "profiles/${profile.id}").apply {
+            if (!exists()) mkdirs()
+        }
+
+        // 1. Generate geckoview-config.yaml for Native RFP & Security Settings
+        val configFile = File(profileDir, "geckoview-config.yaml")
+        writeProfileConfig(configFile)
+
+        // 2. Build GeckoRuntime with isolated config path
+        val runtimeSettings = GeckoRuntimeSettings.Builder()
+            .configFilePath(configFile.absolutePath)
+            .consoleOutput(false)
+            .build()
+
+        val activeRuntime = GeckoRuntime.create(context, runtimeSettings)
+        this.runtime = activeRuntime
+
+        // 3. Install Extension & Set Up Bridge
+        registerExtensionBridge(activeRuntime, profile)
+
+        // 4. Create Sandboxed GeckoSession with matching UA
+        val sessionSettings = GeckoSessionSettings.Builder()
+            .usePrivateMode(false)
+            .userAgentOverride(profile.userAgent)
+            .viewportMode(GeckoSessionSettings.VIEWPORT_MODE_MOBILE)
+            .build()
+
+        val session = GeckoSession(sessionSettings)
+        session.open(activeRuntime)
+
+        return Pair(activeRuntime, session)
+    }
+
+    private fun writeProfileConfig(targetFile: File) {
+        val yaml = """
+            env:
+              MOZ_REMOTE_SETTINGS_DEV: "1"
+            args:
+              - "--pref"
+              - "privacy.resistFingerprinting=true"
+              - "--pref"
+              - "privacy.resistFingerprinting.autoDeclineNoUserInputCanvasPrompts=true"
+              - "--pref"
+              - "privacy.reduceTimerPrecision=true"
+              - "--pref"
+              - "privacy.resistFingerprinting.reduceTimerPrecision.microseconds=20000"
+              - "--pref"
+              - "media.peerconnection.ice.default_address_only=true"
+              - "--pref"
+              - "media.peerconnection.ice.no_host=true"
+              - "--pref"
+              - "dom.security.https_only_mode=false"
+        """.trimIndent()
+
+        FileWriter(targetFile, false).use { it.write(yaml) }
+    }
+
+    private fun registerExtensionBridge(runtime: GeckoRuntime, profile: BrowserProfile) {
+        val extensionUri = "resource://android/assets/extensions/antidetect/"
+
+        runtime.webExtensionController.installBuiltIn(extensionUri)
+            .accept(
+                { extension ->
+                    extension?.let { ext ->
+                        runtime.webExtensionController.setMessageDelegate(
+                            ext,
+                            object : WebExtension.MessageDelegate {
+                                override fun onConnect(port: WebExtension.Port) {
+                                    nativePort = port
+                                    pushProfileConfig(profile)
+                                }
+                            },
+                            "antidetect_bridge"
+                        )
+                    }
+                },
+                { throwable ->
+                    throwable.printStackTrace()
+                }
+            )
+    }
+
+    private fun pushProfileConfig(profile: BrowserProfile) {
+        val payload = JSONObject().apply {
+            put("action", "APPLY_PROFILE")
+            put("payload", JSONObject().apply {
+                put("hardwareConcurrency", profile.hardwareConcurrency)
+                put("deviceMemory", profile.deviceMemory)
+                put("webGlVendor", profile.webGlVendor)
+                put("webGlRenderer", profile.webGlRenderer)
+            })
+        }
+        nativePort?.postMessage(payload)
+    }
+}
+
+```
+
+---
+
+## 6. Layout & Activity Implementation
+
+### File: `app/src/main/res/layout/activity_main.xml`
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout 
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#121212">
+
+    <!-- Top Profile Selector Bar -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp"
+        android:background="#1E1E1E">
+
+        <Spinner
+            android:id="@+id/profile_spinner"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:backgroundTint="#FFFFFF" />
+
+        <Button
+            android:id="@+id/btn_switch_profile"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Apply"
+            android:layout_marginStart="8dp" />
+    </LinearLayout>
+
+    <!-- Navigation Control Bar -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp"
+        android:background="#252525">
+
+        <EditText
+            android:id="@+id/url_input"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:hint="Enter URL or target site..."
+            android:textColorHint="#888888"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:inputType="textUri"
+            android:imeOptions="actionGo"
+            android:paddingHorizontal="12dp"
+            android:background="#333333" />
+
+        <Button
+            android:id="@+id/btn_go"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Go"
+            android:layout_marginStart="8dp" />
+    </LinearLayout>
+
+    <!-- GeckoView Sandbox Container -->
+    <org.mozilla.geckoview.GeckoView
+        android:id="@+id/geckoview"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+</LinearLayout>
+
+```
+
+### File: `app/src/main/java/com/multibrowser/antidetect/MainActivity.kt`
+
+```kotlin
+package com.multibrowser.antidetect
+
+import android.os.Bundle
+import android.view.inputmethod.EditorInfo
+import android.widget.ArrayAdapter
+import androidx.appcompat.app.AppCompatActivity
+import com.multibrowser.antidetect.databinding.ActivityMainBinding
+import com.multibrowser.antidetect.engine.GeckoProfileManager
+import com.multibrowser.antidetect.models.BrowserProfile
+import com.multibrowser.antidetect.models.ProfilePresets
+import org.mozilla.geckoview.GeckoSession
+
+class MainActivity : AppCompatActivity() {
+
+    private lateinit var binding: ActivityMainBinding
+    private lateinit var profileManager: GeckoProfileManager
+    private var currentSession: GeckoSession? = null
+
+    private val profileList = listOf(
+        ProfilePresets.SAMSUNG_A54,
+        ProfilePresets.PIXEL_8A,
+        ProfilePresets.TECNO_CAMON_30
+    )
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        profileManager = GeckoProfileManager(this)
+        setupUI()
+        loadProfile(profileList[0]) // Default: Samsung Galaxy A54
+    }
+
+    private fun setupUI() {
+        val adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            profileList.map { it.name }
+        )
+        binding.profileSpinner.adapter = adapter
+
+        binding.btnSwitchProfile.setOnClickListener {
+            val selectedProfile = profileList[binding.profileSpinner.selectedItemPosition]
+            loadProfile(selectedProfile)
+        }
+
+        binding.btnGo.setOnClickListener {
+            navigateFromInput()
+        }
+
+        binding.urlInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_GO) {
+                navigateFromInput()
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    private fun loadProfile(profile: BrowserProfile) {
+        currentSession?.close()
+
+        val (_, session) = profileManager.initializeProfile(profile)
+        this.currentSession = session
+        binding.geckoview.setSession(session)
+
+        // Initial default diagnostic load
+        session.loadUri("https://iphey.com")
+        binding.urlInput.setText("https://iphey.com")
+    }
+
+    private fun navigateFromInput() {
+        var input = binding.urlInput.text.toString().trim()
+        if (input.isNotEmpty()) {
+            if (!input.startsWith("http://") && !input.startsWith("https://")) {
+                input = "https://$input"
+            }
+            currentSession?.loadUri(input)
+        }
+    }
+
+    override fun onDestroy() {
+        currentSession?.close()
+        super.onDestroy()
+    }
+}
+
+```
+
+---
+
+## 7. Execution Checklist for the Coding Agent
+
+Follow this checklist sequentially to construct and deploy the application:
+
+1. **Gradle Build Verification:**
+* Build project using Gradle with JDK 17.
+* Ensure `[https://maven.mozilla.org/maven2/](https://maven.mozilla.org/maven2/)` is reachable and syncs `org.mozilla.geckoview:geckoview`.
+
+
+2. **Asset Directory Assembly:**
+* Create directory: `app/src/main/assets/extensions/antidetect/`.
+* Place `manifest.json`, `background.js`, and `content.js` strictly within this folder.
+
+
+3. **Runtime Sandbox Testing:**
+* Run the app on an Android device or emulator (`arm64-v8a`).
+* Test Profile 1 (Samsung Galaxy A54) against `[https://iphey.com](https://iphey.com)`. Verify that:
+* IP and WebRTC match without host leakage.
+* Browser signals report 0 inconsistencies.
+
+
+* Navigate to `[https://abrahamjuliot.github.io/creepjs/](https://abrahamjuliot.github.io/creepjs/)`.
+* Ensure the **Trust Score** reaches $\ge 88\% - 95\%$ with green checkmarks across Canvas, Audio, and Worker scopes.

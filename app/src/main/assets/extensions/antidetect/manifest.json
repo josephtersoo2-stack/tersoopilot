@@ -1,0 +1,37 @@
+{
+  "manifest_version": 2,
+  "name": "TersoPilotPerceptionEngine",
+  "version": "2.0",
+  "description": "Perception and spatial DOM telemetry for closed-loop automation.",
+  "permissions": [
+    "<all_urls>",
+    "nativeMessaging",
+    "geckoViewAddons",
+    "cookies"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "perception.js"
+      ],
+      "run_at": "document_end"
+    }
+  ]
+}

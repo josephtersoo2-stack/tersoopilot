@@ -1,0 +1,825 @@
+# Full System Specification: Anti-Detect Multi-Profile Browser with Universal Cookie Import/Export
+
+This comprehensive specification covers the mobile GeckoView client, native SQLite ingestion/extraction routines, React Admin dashboard, and Django REST backend.
+
+It incorporates full lifecycle management for cookies:
+
+1. **Importing cookies onto pre-existing profiles** (re-populating live or dormant profiles).
+2. **Pre-populating cookies during profile creation** (uploading or pasting Netscape/JSON cookies into the creation bottom sheet so the browser launches pre-authenticated).
+3. **Exporting cookies from the Android app** (copying to clipboard or saving as standard Netscape/JSON `.json`/`.txt` files).
+4. **Exporting cookies directly from the Django backend / React dashboard** (downloading any cloud-synced profile's session cookies straight to your desktop).
+
+---
+
+## 1. System Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                 React Admin Dashboard                       │
+│  - Profile List & Live Session Viewer                       │
+│  - Global Settings (Max Profiles, Audio Mute, 240p Clamp)   │
+│  - Cloud Cookie Downloader (Export Netscape/JSON)           │
+└──────────────────────────────▲──────────────────────────────┘
+                               │ REST API (JSON / File Downloads)
+┌──────────────────────────────▼──────────────────────────────┐
+│                  Django REST Framework                      │
+│  - /api/profiles/ (CRUD)                                    │
+│  - /api/profiles/{id}/cookies/export/ (Download JSON/Netscape)
+│  - /api/profiles/{id}/cookies/import/ (Backend Injection)   │
+│  - /api/profiles/{id}/sync/ & /restore/ (Encrypted Blob)    │
+│  - /api/devices/generate/ (LLM Spec Builder)                │
+└──────────────────────────────▲──────────────────────────────┘
+                               │ JSON / Encrypted Payload
+┌──────────────────────────────▼──────────────────────────────┐
+│                  Android Mobile Client                      │
+│  - Single-App Container (GeckoView View-Swapping)           │
+│  - UI: "Import Cookies", "Export Cookies" on Cards & Sheets │
+│  - Profile Creation Sheet: Cookie Pre-Populate Field        │
+│  - Storage Engine: Zero-Lock SQLite Importer & Exporter     │
+│  - WebExtension: Audio Lock, 240p Force, WebGL Hooks        │
+└─────────────────────────────────────────────────────────────┘
+
+```
+
+---
+
+## 2. Standard Cookie Schema (Netscape / JSON)
+
+All imports and exports adhere to this cross-compatible format:
+
+```json
+[
+  {
+    "name": "session_id",
+    "value": "xyz123456789",
+    "domain": ".google.com",
+    "path": "/",
+    "expiry": 1798765432,
+    "isSecure": true,
+    "isHttpOnly": true,
+    "sameSite": 0
+  }
+]
+
+```
+
+---
+
+## 3. Django REST Backend: Complete Implementation
+
+### File: `backend/requirements.txt`
+
+```text
+Django>=5.1.0
+djangorestframework>=3.15.2
+django-cors-headers>=4.4.0
+pydantic>=2.8.0
+google-genai>=0.1.1
+requests>=2.32.3
+python-dotenv>=1.0.1
+
+```
+
+### File: `backend/devices/models.py`
+
+```python
+import uuid
+from django.db import models
+
+class SavedProfile(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=150)
+    brand = models.CharField(max_length=100)
+    model_name = models.CharField(max_length=150)
+    model_code = models.CharField(max_length=100)
+    android_version = models.IntegerField(default=14)
+    soc = models.CharField(max_length=150)
+    webgl_vendor = models.CharField(max_length=100)
+    webgl_renderer = models.CharField(max_length=150)
+    ram_gb = models.IntegerField(default=8)
+    cpu_cores = models.IntegerField(default=8)
+    screen_width = models.IntegerField(default=384)
+    screen_height = models.IntegerField(default=854)
+    dpr = models.FloatField(default=2.8125)
+    user_agent = models.TextField()
+
+    # Network / Proxy
+    proxy_type = models.CharField(max_length=20, default="DIRECT")
+    proxy_host = models.CharField(max_length=255, blank=True, default="")
+    proxy_port = models.IntegerField(default=0)
+    proxy_user = models.CharField(max_length=100, blank=True, default="")
+    proxy_pass = models.CharField(max_length=100, blank=True, default="")
+
+    # Raw / Plaintext Cookie Store for Backend Import/Export (JSON formatted)
+    stored_cookies_json = models.TextField(blank=True, default="[]")
+    cookie_count = models.IntegerField(default=0)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.model_name})"
+
+class ProfileSyncEnvelope(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    profile_id = models.CharField(max_length=100, db_index=True)
+    owner_username = models.CharField(max_length=150, db_index=True)
+    ciphertext = models.TextField()
+    iv = models.CharField(max_length=64)
+    salt = models.CharField(max_length=64)
+    version = models.PositiveIntegerField(default=1)
+    cookie_count = models.PositiveIntegerField(default=0)
+    history_count = models.PositiveIntegerField(default=0)
+    client_timestamp = models.BigIntegerField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("profile_id", "owner_username")
+
+class GlobalSetting(models.Model):
+    singleton_id = models.IntegerField(primary_key=True, default=1)
+    max_active_profiles = models.IntegerField(default=5)
+    force_global_mute = models.BooleanField(default=True)
+    default_video_resolution = models.CharField(max_length=20, default="240p")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        self.singleton_id = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def load(cls):
+        obj, _ = cls.objects.get_or_create(singleton_id=1)
+        return obj
+
+```
+
+### File: `backend/devices/serializers.py`
+
+```python
+import json
+from rest_framework import serializers
+from .models import SavedProfile, GlobalSetting, ProfileSyncEnvelope
+
+class SavedProfileSerializer(models.ModelSerializer):
+    class Meta:
+        model = SavedProfile
+        fields = "__all__"
+
+class CookieImportExportSerializer(serializers.Serializer):
+    cookies = serializers.ListField(
+        child=serializers.DictField(),
+        required=True
+    )
+
+    def validate_cookies(self, value):
+        for item in value:
+            if "name" not in item or "value" not in item or ("domain" not in item and "host" not in item):
+                raise serializers.ValidationError("Each cookie must have 'name', 'value', and 'domain'/'host'.")
+        return value
+
+class GlobalSettingSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GlobalSetting
+        fields = ["max_active_profiles", "force_global_mute", "default_video_resolution", "updated_at"]
+
+class ProfileSyncPushSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProfileSyncEnvelope
+        fields = ["ciphertext", "iv", "salt", "cookie_count", "history_count", "client_timestamp"]
+
+class ProfileSyncPullSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProfileSyncEnvelope
+        fields = ["profile_id", "version", "ciphertext", "iv", "salt", "cookie_count", "history_count", "client_timestamp", "updated_at"]
+
+```
+
+### File: `backend/devices/views.py`
+
+```python
+import json
+from django.http import HttpResponse
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status, viewsets
+from .models import SavedProfile, GlobalSetting, ProfileSyncEnvelope
+from .serializers import (
+    SavedProfileSerializer,
+    CookieImportExportSerializer,
+    GlobalSettingSerializer,
+    ProfileSyncPushSerializer,
+    ProfileSyncPullSerializer
+)
+
+class SavedProfileViewSet(viewsets.ModelViewSet):
+    queryset = SavedProfile.objects.all().order_by("-updated_at")
+    serializer_class = SavedProfileSerializer
+
+class ProfileCookieExportView(APIView):
+    """Exports cookies for a profile as a downloadable JSON file or raw JSON payload."""
+    def get(self, request, profile_id):
+        try:
+            profile = SavedProfile.objects.get(id=profile_id)
+            cookies_data = json.loads(profile.stored_cookies_json or "[]")
+
+            # Check if user requested direct file attachment
+            as_file = request.query_params.get("download", "false").lower() == "true"
+            if as_file:
+                response = HttpResponse(
+                    json.dumps(cookies_data, indent=2),
+                    content_type="application/json"
+                )
+                response["Content-Disposition"] = f'attachment; filename="cookies_{profile.name.replace(" ", "_")}.json"'
+                return response
+
+            return Response({
+                "profile_id": str(profile.id),
+                "cookie_count": len(cookies_data),
+                "cookies": cookies_data
+            }, status=status.HTTP_200_OK)
+        except SavedProfile.DoesNotExist:
+            return Response({"error": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
+
+class ProfileCookieImportView(APIView):
+    """Imports raw Netscape/JSON cookies directly into a backend profile record."""
+    def post(self, request, profile_id):
+        try:
+            profile = SavedProfile.objects.get(id=profile_id)
+            serializer = CookieImportExportSerializer(data=request.data)
+            if not serializer.is_valid():
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            cookie_list = serializer.validated_data["cookies"]
+            profile.stored_cookies_json = json.dumps(cookie_list)
+            profile.cookie_count = len(cookie_list)
+            profile.save()
+
+            return Response({
+                "status": "SUCCESS",
+                "profile_id": str(profile.id),
+                "imported_count": profile.cookie_count
+            }, status=status.HTTP_200_OK)
+        except SavedProfile.DoesNotExist:
+            return Response({"error": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
+
+class GlobalSettingView(APIView):
+    def get(self, request):
+        return Response(GlobalSettingSerializer(GlobalSetting.load()).data)
+
+    def patch(self, request):
+        serializer = GlobalSettingSerializer(GlobalSetting.load(), data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class ProfileSyncView(APIView):
+    def post(self, request, profile_id):
+        serializer = ProfileSyncPushSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        owner = request.user.username if request.user.is_authenticated else "default_user"
+        v = serializer.validated_data
+
+        env, created = ProfileSyncEnvelope.objects.get_or_create(
+            profile_id=profile_id,
+            owner_username=owner,
+            defaults={**v, "version": 1}
+        )
+        if not created:
+            for key, val in v.items():
+                setattr(env, key, val)
+            env.version += 1
+            env.save()
+
+        return Response({"status": "SYNCED", "version": env.version}, status=status.HTTP_200_OK)
+
+    def get(self, request, profile_id):
+        owner = request.user.username if request.user.is_authenticated else "default_user"
+        try:
+            env = ProfileSyncEnvelope.objects.get(profile_id=profile_id, owner_username=owner)
+            return Response(ProfileSyncPullSerializer(env).data)
+        except ProfileSyncEnvelope.DoesNotExist:
+            return Response({"error": "Backup not found"}, status=status.HTTP_404_NOT_FOUND)
+
+```
+
+### File: `backend/devices/urls.py`
+
+```python
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
+from .views import (
+    SavedProfileViewSet,
+    ProfileCookieExportView,
+    ProfileCookieImportView,
+    GlobalSettingView,
+    ProfileSyncView
+)
+
+router = DefaultRouter()
+router.register(r"profiles", SavedProfileViewSet, basename="saved-profile")
+
+urlpatterns = [
+    path("settings/global/", GlobalSettingView.as_view(), name="global-settings"),
+    path("profiles/<str:profile_id>/cookies/export/", ProfileCookieExportView.as_view(), name="cookie-export"),
+    path("profiles/<str:profile_id>/cookies/import/", ProfileCookieImportView.as_view(), name="cookie-import"),
+    path("profiles/<str:profile_id>/sync/", ProfileSyncView.as_view(), name="profile-sync"),
+    path("profiles/<str:profile_id>/restore/", ProfileSyncView.as_view(), name="profile-restore"),
+    path("", include(router.urls)),
+]
+
+```
+
+---
+
+## 4. React Admin Dashboard: Remote Cookie Management & Downloader
+
+Add this panel to your React admin application (`admin-panel/src/App.jsx`) to monitor, import, and download cookies directly from the cloud:
+
+```jsx
+import React, { useEffect, useState } from 'react';
+import axios from 'axios';
+
+const API_BASE = 'http://localhost:8000/api/';
+
+export default function App() {
+  const [profiles, setProfiles] = useState([]);
+  const [importJsonText, setImportJsonText] = useState('');
+  const [activeProfileForImport, setActiveProfileForImport] = useState(null);
+
+  useEffect(() => {
+    loadProfiles();
+  }, []);
+
+  const loadProfiles = async () => {
+    const res = await axios.get(`${API_BASE}profiles/`);
+    setProfiles(res.data);
+  };
+
+  const handleDownloadCookies = (profileId, profileName) => {
+    // Direct browser trigger to download as formatted .json
+    window.open(`${API_BASE}profiles/${profileId}/cookies/export/?download=true`, '_blank');
+  };
+
+  const handleImportSubmit = async () => {
+    if (!activeProfileForImport || !importJsonText) return;
+    try {
+      const parsed = JSON.parse(importJsonText);
+      await axios.post(`${API_BASE}profiles/${activeProfileForImport.id}/cookies/import/`, {
+        cookies: Array.isArray(parsed) ? parsed : [parsed]
+      });
+      alert('Cookies imported successfully into backend profile!');
+      setImportJsonText('');
+      setActiveProfileForImport(null);
+      loadProfiles();
+    } catch (e) {
+      alert('Invalid JSON or Network Error: ' + e.message);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-neutral-950 text-neutral-100 p-8">
+      <h1 className="text-2xl font-bold mb-6">AntiDetect Cookie & Profile Management</h1>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Profile List with Cookie Controls */}
+        <div className="space-y-4">
+          {profiles.map(p => (
+            <div key={p.id} className="bg-neutral-900 border border-neutral-800 p-4 rounded-xl flex justify-between items-center">
+              <div>
+                <h3 className="font-semibold">{p.name}</h3>
+                <p className="text-xs text-neutral-400">{p.model_name} • {p.cookie_count || 0} cookies stored</p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => handleDownloadCookies(p.id, p.name)}
+                  className="bg-neutral-800 hover:bg-neutral-700 text-xs px-3 py-1.5 rounded border border-neutral-700 text-blue-400"
+                >
+                  Download .JSON
+                </button>
+                <button
+                  onClick={() => setActiveProfileForImport(p)}
+                  className="bg-blue-600 hover:bg-blue-500 text-xs px-3 py-1.5 rounded text-white"
+                >
+                  Import
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* JSON Cookie Importer Drawer */}
+        {activeProfileForImport && (
+          <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-xl">
+            <h2 className="text-lg font-semibold mb-2">Import Cookies into: {activeProfileForImport.name}</h2>
+            <p className="text-xs text-neutral-400 mb-4">Paste standard Netscape or JSON cookie array below:</p>
+            <textarea
+              rows={8}
+              value={importJsonText}
+              onChange={(e) => setImportJsonText(e.target.value)}
+              placeholder='[{"name": "SID", "value": "...", "domain": ".google.com", "path": "/"}]'
+              className="w-full bg-neutral-950 border border-neutral-800 rounded p-3 text-xs font-mono text-white mb-4"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setActiveProfileForImport(null)}
+                className="px-4 py-2 text-xs bg-neutral-800 rounded hover:bg-neutral-700"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleImportSubmit}
+                className="px-4 py-2 text-xs bg-emerald-600 rounded hover:bg-emerald-500 font-medium"
+              >
+                Save to Profile
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+```
+
+---
+
+## 5. Android Client: Universal SQLite Cookie Ingestion & Extraction Engine
+
+This engine operates with **zero database locking issues**. It safely parses Netscape/JSON cookies, writes directly to `moz_cookies` with correct Firefox schema constraints, and handles conversions between Netscape and modern JSON.
+
+### File: `app/src/main/java/com/multibrowser/antidetect/sync/CookieEngine.kt`
+
+```kotlin
+package com.multibrowser.antidetect.sync
+
+import android.content.ContentValues
+import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+
+object CookieEngine {
+
+    /**
+     * Extracts all cookies from a profile's isolated cookies.sqlite database into clean JSON.
+     */
+    fun exportCookiesToJson(context: Context, profileId: String): String {
+        val profileDir = File(context.filesDir, "profiles/$profileId")
+        val dbFile = File(profileDir, "cookies.sqlite")
+
+        if (!dbFile.exists()) return "[]"
+
+        val jsonArray = JSONArray()
+        val db = SQLiteDatabase.openDatabase(dbFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+        try {
+            val cursor = db.rawQuery(
+                """
+                SELECT host, name, value, path, expiry, isSecure, isHttpOnly, sameSite 
+                FROM moz_cookies
+                """.trimIndent(),
+                null
+            )
+            while (cursor.moveToNext()) {
+                val cookie = JSONObject().apply {
+                    put("domain", cursor.getString(0))
+                    put("host", cursor.getString(0))
+                    put("name", cursor.getString(1))
+                    put("value", cursor.getString(2))
+                    put("path", cursor.getString(3))
+                    put("expiry", cursor.getLong(4))
+                    put("isSecure", cursor.getInt(5) == 1)
+                    put("isHttpOnly", cursor.getInt(6) == 1)
+                    put("sameSite", cursor.getInt(7))
+                }
+                jsonArray.put(cookie)
+            }
+            cursor.close()
+        } finally {
+            db.close()
+        }
+        return jsonArray.toString(2)
+    }
+
+    /**
+     * Imports a JSON or Netscape-style cookie array into an existing or uninitialized profile directory.
+     */
+    fun importCookiesFromJson(context: Context, profileId: String, rawJsonOrNetscape: String): Int {
+        val profileDir = File(context.filesDir, "profiles/$profileId").apply {
+            if (!exists()) mkdirs()
+        }
+
+        // 1. Flush any orphan WAL files that would cause SQLite locks
+        File(profileDir, "cookies.sqlite-wal").delete()
+        File(profileDir, "cookies.sqlite-shm").delete()
+
+        // 2. Normalize input: parse either standard JSON array or line-delimited Netscape format
+        val cookiesArray = parseToStandardJsonArray(rawJsonOrNetscape)
+
+        val dbFile = File(profileDir, "cookies.sqlite")
+        val db = SQLiteDatabase.openOrCreateDatabase(dbFile, null)
+        var importedCount = 0
+
+        try {
+            // Guarantee GeckoView moz_cookies table exists
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS moz_cookies (
+                    id INTEGER PRIMARY KEY,
+                    originAttributes TEXT NOT NULL DEFAULT '',
+                    name TEXT,
+                    value TEXT,
+                    host TEXT,
+                    path TEXT,
+                    expiry INTEGER,
+                    lastAccessed INTEGER,
+                    creationTime INTEGER,
+                    isSecure INTEGER,
+                    isHttpOnly INTEGER,
+                    inBrowserElement INTEGER DEFAULT 0,
+                    sameSite INTEGER DEFAULT 0,
+                    rawSameSite INTEGER DEFAULT 0,
+                    schemeMap INTEGER DEFAULT 0
+                );
+                """.trimIndent()
+            )
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS moz_basedomain ON moz_cookies (host, name, path, originAttributes);")
+
+            db.beginTransaction()
+            val nowMicroseconds = System.currentTimeMillis() * 1000
+
+            for (i in 0 until cookiesArray.length()) {
+                val c = cookiesArray.getJSONObject(i)
+                val domain = c.optString("domain", c.optString("host", ""))
+                val name = c.optString("name", "")
+                val value = c.optString("value", "")
+                val path = c.optString("path", "/")
+
+                if (domain.isBlank() || name.isBlank()) continue
+
+                // Expiry calculation: default to 1 year in seconds if missing
+                val expiry = c.optLong("expiry", (System.currentTimeMillis() / 1000) + 31536000)
+
+                val cv = ContentValues().apply {
+                    put("host", domain)
+                    put("name", name)
+                    put("value", value)
+                    put("path", path)
+                    put("expiry", expiry)
+                    put("isSecure", if (c.optBoolean("isSecure", false)) 1 else 0)
+                    put("isHttpOnly", if (c.optBoolean("isHttpOnly", false)) 1 else 0)
+                    put("sameSite", c.optInt("sameSite", 0))
+                    put("lastAccessed", nowMicroseconds)
+                    put("creationTime", nowMicroseconds)
+                }
+
+                db.insertWithOnConflict("moz_cookies", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                importedCount++
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+            db.close()
+        }
+
+        return importedCount
+    }
+
+    private fun parseToStandardJsonArray(raw: String): JSONArray {
+        val trimmed = raw.trim()
+        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+            return JSONArray(trimmed)
+        }
+
+        // Netscape format fallback: domain \t flag \t path \t secure \t expiry \t name \t value
+        val result = JSONArray()
+        trimmed.lines().forEach { line ->
+            val l = line.trim()
+            if (l.isNotEmpty() && !l.startsWith("#")) {
+                val parts = l.split("\t")
+                if (parts.size >= 7) {
+                    val obj = JSONObject().apply {
+                        put("domain", parts[0])
+                        put("path", parts[2])
+                        put("isSecure", parts[3].equals("TRUE", ignoreCase = true))
+                        put("expiry", parts[4].toLongOrNull() ?: ((System.currentTimeMillis() / 1000) + 31536000))
+                        put("name", parts[5])
+                        put("value", parts[6])
+                        put("isHttpOnly", false)
+                        put("sameSite", 0)
+                    }
+                    result.put(obj)
+                }
+            }
+        }
+        return result
+    }
+}
+
+```
+
+---
+
+## 6. Android UI: Bottom Sheets for Cookie Ingestion & Pre-Population
+
+### A. Pre-Populate Cookies in the Create Profile Bottom Sheet
+
+Add a cookie paste/input field to `CreateProfileBottomSheet.kt` so users can paste JSON cookies *before* the profile is created.
+
+```kotlin
+// Inside CreateProfileBottomSheet.kt
+var preloadedCookiesRaw by remember { mutableStateOf("") }
+var showCookieInput by remember { mutableStateOf(false) }
+
+// Collapsible Cookie Injection Container
+Card(
+    colors = CardDefaults.cardColors(containerColor = Color(0xFF2C2C2E)),
+    shape = RoundedCornerShape(12.dp),
+    modifier = Modifier.fillMaxWidth()
+) {
+    Column(modifier = Modifier.padding(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("Pre-Populate Cookies (Optional)", style = MaterialTheme.typography.labelLarge)
+            TextButton(onClick = { showCookieInput = !showCookieInput }) {
+                Text(if (showCookieInput) "Hide" else "Paste JSON")
+            }
+        }
+
+        if (showCookieInput) {
+            OutlinedTextField(
+                value = preloadedCookiesRaw,
+                onValueChange = { preloadedCookiesRaw = it },
+                placeholder = { Text("Paste JSON / Netscape cookies here...") },
+                modifier = Modifier.fillMaxWidth().height(120.dp),
+                textStyle = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
+}
+
+// On Save Profile Execution:
+Button(
+    onClick = {
+        val newProfile = ProfileEntity(
+            name = if (profileName.isBlank()) "Profile ${System.currentTimeMillis() % 1000}" else profileName,
+            brand = brand,
+            modelName = selectedModel,
+            modelCode = selectedModelCode,
+            androidVersion = androidVersion,
+            userAgent = userAgent,
+            soc = soc,
+            webGlVendor = webGlVendor,
+            webGlRenderer = webGlRenderer,
+            ramGb = ramGb,
+            cpuCores = cpuCores,
+            screenWidth = screenWidth,
+            screenHeight = screenHeight,
+            dpr = dpr
+        )
+
+        // 1. Ingest Cookies immediately if provided
+        if (preloadedCookiesRaw.isNotBlank()) {
+            val count = CookieEngine.importCookiesFromJson(context, newProfile.id, preloadedCookiesRaw)
+            newProfile.cookieCount = count
+        }
+
+        onSaveProfile(newProfile)
+    },
+    modifier = Modifier.fillMaxWidth()
+) {
+    Text("Save Profile")
+}
+
+```
+
+---
+
+### B. Dedicated Import/Export Dialog for Existing Profiles
+
+Create `app/src/main/java/com/multibrowser/antidetect/ui/components/CookieActionDialog.kt`:
+
+```kotlin
+package com.multibrowser.antidetect.ui.components
+
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import com.multibrowser.antidetect.sync.CookieEngine
+
+@Composable
+fun CookieActionDialog(
+    profileId: String,
+    profileName: String,
+    onDismiss: () -> Unit,
+    onCookiesUpdated: (Int) -> Unit
+) {
+    val context = LocalContext.current
+    var pastedJson by remember { mutableStateOf("") }
+    var tabIndex by remember { mutableIntStateOf(0) } // 0 = Export, 1 = Import
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Cookies: $profileName") },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                TabRow(selectedTabIndex = tabIndex) {
+                    Tab(selected = tabIndex == 0, onClick = { tabIndex = 0 }, text = { Text("Export") })
+                    Tab(selected = tabIndex == 1, onClick = { tabIndex = 1 }, text = { Text("Import") })
+                }
+
+                if (tabIndex == 0) {
+                    val exported = remember { CookieEngine.exportCookiesToJson(context, profileId) }
+                    OutlinedTextField(
+                        value = exported,
+                        onValueChange = {},
+                        readOnly = true,
+                        modifier = Modifier.fillMaxWidth().height(180.dp),
+                        textStyle = MaterialTheme.typography.bodySmall
+                    )
+                    Button(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText("Cookies", exported))
+                            Toast.makeText(context, "Copied to Clipboard!", Toast.LENGTH_SHORT).show()
+                            onDismiss()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Copy to Clipboard")
+                    }
+                } else {
+                    OutlinedTextField(
+                        value = pastedJson,
+                        onValueChange = { pastedJson = it },
+                        placeholder = { Text("Paste JSON or Netscape cookies here...") },
+                        modifier = Modifier.fillMaxWidth().height(180.dp),
+                        textStyle = MaterialTheme.typography.bodySmall
+                    )
+                    Button(
+                        onClick = {
+                            if (pastedJson.isNotBlank()) {
+                                val count = CookieEngine.importCookiesFromJson(context, profileId, pastedJson)
+                                Toast.makeText(context, "Imported $count cookies!", Toast.LENGTH_SHORT).show()
+                                onCookiesUpdated(count)
+                                onDismiss()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Import & Overwrite")
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    )
+}
+
+```
+
+---
+
+## 7. Verification & Runbook
+
+1. **Verify Pre-Population on Creation:**
+* Open the app $\rightarrow$ Click `+ New Profile`.
+* Under **Pre-Populate Cookies**, paste a test JSON array:
+```json
+[{"name":"test_session","value":"active_123","domain":".google.com","path":"/"}]
+
+```
+
+
+* Save the profile and launch it.
+* Open Developer Tools or verify via `CookieActionDialog` (Export tab) that `test_session` appears with domain `.google.com`.
+
+
+2. **Verify Backend Cloud Export:**
+* Trigger "Sync Now" from the profile bottom sheet.
+* Open the React admin dashboard (`http://localhost:5173`) or browse directly to `http://localhost:8000/api/profiles/{id}/cookies/export/?download=true`.
+* Verify the browser downloads a valid, human-readable `.json` file containing all session tokens.
+
+
+3. **Verify SQLite Database Lock Immunity:**
+* Close and re-open running profiles while repeatedly importing and exporting cookies.
+* Verify that no SQLite busy exceptions (`SQLiteDatabaseLockedException`) occur, as sessions are cleanly flushed and WAL files are removed before ingestion.
