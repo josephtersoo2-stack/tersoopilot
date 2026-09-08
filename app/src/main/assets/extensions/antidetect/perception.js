@@ -91,6 +91,14 @@
     });
   };
 
+  // Expose to window.wrappedJSObject for page context access in GeckoView
+  try {
+    if (typeof window.wrappedJSObject !== 'undefined') {
+      window.wrappedJSObject.detectBrowserPageState = window.detectBrowserPageState;
+      window.wrappedJSObject.extractDomSnapshot = window.extractDomSnapshot;
+    }
+  } catch (e) {}
+
   // 3. Local Tier-1 Autonomous Skip Observer (Zero Token Ad Dismissal)
   const autoSkipObserver = new MutationObserver(() => {
     const skipBtn = document.querySelector(
