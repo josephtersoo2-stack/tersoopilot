@@ -47,6 +47,10 @@ class GhostPilotRunner(
     var currentStateId by mutableStateOf<String?>(null)
         private set
 
+    private var pendingOutcome: String? = null
+    private var transitionId: String? = null
+    private var executedSteps = 0
+    private var jobStartedAt = 0L
     var recordedWatchSeconds: Int = 0
 
     // Callbacks to preserve UI & toolbar integration
@@ -89,6 +93,8 @@ class GhostPilotRunner(
         isRunning = false
         runnerScope?.cancel()
         runnerScope = null
+        pendingOutcome = null
+        transitionId = null
         currentJobId = null
         currentDag = null
         currentStateId = null
@@ -110,6 +116,8 @@ class GhostPilotRunner(
                         Log.i(TAG, "Claimed Job: $currentJobId. Entry State: $currentStateId")
                         onStateChanged?.invoke(true, currentStateId)
 
+                        executedSteps = 0
+                        jobStartedAt = android.os.SystemClock.elapsedRealtime()
                         launchHeartbeat(currentJobId!!)
                     } else {
                         delay(5000L)
@@ -117,6 +125,17 @@ class GhostPilotRunner(
                     }
                 }
 
+                // Retry reporting an outcome without repeating the physical action.
+                pendingOutcome?.let {
+                    handleTransition(it)
+                    pendingOutcome = null
+                    return@let
+                }
+                if (currentJobId == null) continue
+                if (executedSteps >= 500 || android.os.SystemClock.elapsedRealtime() - jobStartedAt > 30 * 60 * 1000L) {
+                    withContext(Dispatchers.Main) { stop() }
+                    break
+                }
                 // 2. Fetch current DAG state definition
                 val states = currentDag?.getAsJsonObject("states")
                 val currentNode = states?.getAsJsonObject(currentStateId)
@@ -134,9 +153,12 @@ class GhostPilotRunner(
 
                 // 3. Dispatch closed-loop atomic command
                 val outcome = executeClosedLoopCommand(command, params)
+                executedSteps++
+                pendingOutcome = outcome
 
                 // 4. Report transition to backend
                 handleTransition(outcome)
+                pendingOutcome = null
 
             } catch (e: CancellationException) {
                 throw e
@@ -190,7 +212,7 @@ class GhostPilotRunner(
                 }
             }
 
-            "YT_SUBMIT_SEARCH" -> {
+            "YT_SUBMIT_SEARCH", "SUBMIT_INPUT" -> {
                 inputController.type("\n")
                 delay(3000L)
                 "SUCCESS"
@@ -322,7 +344,10 @@ class GhostPilotRunner(
 
             "TERMINATE", "COMPLETE" -> "SUCCESS"
 
-            else -> "SUCCESS"
+            else -> {
+                Log.e(TAG, "Unsupported command: $command")
+                "FAILURE"
+            }
         }
     }
 
@@ -388,13 +413,16 @@ class GhostPilotRunner(
 
     private suspend fun handleTransition(outcome: String, error: String? = null) {
         val jobId = currentJobId ?: return
+        if (transitionId == null) transitionId = java.util.UUID.randomUUID().toString()
         val payload = mutableMapOf<String, Any>(
+            "transition_id" to transitionId!!,
             "outcome" to outcome,
             "context_update" to mapOf("watch_seconds_spent" to recordedWatchSeconds)
         )
         if (error != null) payload["error"] = error
 
         val response = api.transitionState(jobId, payload)
+        transitionId = null
         val isTerminal = response.get("is_terminal")?.asBoolean ?: false
         val nextState = response.get("current_state_id")?.asString ?: "exit"
 
@@ -449,7 +477,11 @@ class GhostPilotRunner(
         runnerScope?.launch {
             while (isRunning && currentJobId == jobId) {
                 try {
-                    api.sendHeartbeat(jobId)
+                    val heartbeat = api.sendHeartbeat(jobId)
+                    if (heartbeat.get("status")?.asString == "TERMINAL") {
+                        withContext(Dispatchers.Main) { stop() }
+                        break
+                    }
                 } catch (e: Exception) {
                     Log.w(TAG, "Heartbeat error: ${e.message}")
                 }

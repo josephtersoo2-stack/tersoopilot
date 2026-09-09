@@ -187,7 +187,7 @@ export default function Sidebar({
 
         {/* Link to Django Admin */}
         <a
-          href="http://localhost:8000/admin/"
+          href={import.meta.env.VITE_DJANGO_ADMIN_URL || "/admin/"}
           target="_blank"
           rel="noreferrer"
           className="flex items-center justify-between w-full px-3 py-2 bg-[#131722] hover:bg-[#1A2030] text-neutral-400 hover:text-white rounded-xl border border-[#1E2638] text-xs transition cursor-pointer"

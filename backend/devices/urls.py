@@ -9,7 +9,7 @@ from .views import (
     ProfileCookieExportView,
     ProfileCookieImportView,
 )
-from .auth_views import RegisterView, LoginView, UserMeView
+from .auth_views import RegisterView, LoginView, UserMeView, LogoutView
 from .sync_views import SyncPushView, SyncPullView, AutoSaveSessionView
 
 router = DefaultRouter()
@@ -20,6 +20,8 @@ urlpatterns = [
     path("auth/register/", RegisterView.as_view(), name="auth-register"),
     path("auth/login/", LoginView.as_view(), name="auth-login"),
     path("auth/me/", UserMeView.as_view(), name="auth-me"),
+
+    path("auth/logout/", LogoutView.as_view(), name="auth-logout"),
 
     # Sync endpoints
     path("sync/push/", SyncPushView.as_view(), name="sync-push"),

@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import axios from '../../api';
 import { Play, Youtube, Globe, X, Sliders, MessageSquare, ThumbsUp, UserCheck, FastForward, Film } from 'lucide-react';
 
 export default function TaskDispatchModal({ profiles = [], onClose, onDispatched }) {
+  const [dispatching, setDispatching] = useState(false);
   const [taskCategory, setTaskCategory] = useState('YOUTUBE');
   const [taskName, setTaskName] = useState('YouTube Targeted Growth Campaign');
   const [selectedProfileIds, setSelectedProfileIds] = useState([]);
@@ -34,7 +35,7 @@ export default function TaskDispatchModal({ profiles = [], onClose, onDispatched
   const [enableSpeedToggle, setEnableSpeedToggle] = useState(false);
 
   useEffect(() => {
-    axios.get('http://localhost:8000/api/automation/niches/').then((res) => {
+    axios.get('automation/niches/').then((res) => {
       setNiches(res.data);
       if (res.data.length > 0) setSelectedNicheId(res.data[0].id);
     }).catch(err => console.error('Failed to load niches for dispatch:', err));
@@ -55,11 +56,16 @@ export default function TaskDispatchModal({ profiles = [], onClose, onDispatched
   };
 
   const handleDispatch = async () => {
+    if (dispatching) return;
+    if (Number(minWatch) > Number(maxWatch)) { alert('Minimum duration must not exceed maximum duration.'); return; }
+    if (selectedProfileIds.length > 100) { alert('Select no more than 100 profiles per dispatch.'); return; }
     if (selectedProfileIds.length === 0) {
       alert('Select at least one profile.');
       return;
     }
 
+    if (!window.confirm(`Dispatch "${taskName}" to ${selectedProfileIds.length} selected profile(s)?`)) return;
+    setDispatching(true);
     const candidateKeywords = targetKeyword
       .split(/[\n,]/)
       .map((k) => k.trim())
@@ -93,10 +99,10 @@ export default function TaskDispatchModal({ profiles = [], onClose, onDispatched
     };
 
     try {
-      const taskRes = await axios.post('http://localhost:8000/api/automation/tasks/', taskPayload);
+      const taskRes = await axios.post('automation/tasks/', taskPayload);
       const taskId = taskRes.data.id;
 
-      const dispatchRes = await axios.post(`http://localhost:8000/api/automation/tasks/${taskId}/dispatch/`, {
+      const dispatchRes = await axios.post(`automation/tasks/${taskId}/dispatch/`, {
         profile_ids: selectedProfileIds
       });
 
@@ -104,8 +110,8 @@ export default function TaskDispatchModal({ profiles = [], onClose, onDispatched
       if (onDispatched) onDispatched();
       onClose();
     } catch (err) {
-      alert('Dispatch failed: ' + (err.response?.data?.error || err.message));
-    }
+      alert('Dispatch failed: ' + (err.response?.data?.error || JSON.stringify(err.response?.data) || err.message));
+    } finally { setDispatching(false); }
   };
 
   const parsedKeywords = targetKeyword

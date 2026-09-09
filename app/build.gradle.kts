@@ -22,7 +22,15 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField("String", "API_BASE_URL", "\"http://127.0.0.1:8000/\"")
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
+        }
         release {
+            val apiUrl = providers.gradleProperty("apiBaseUrl").orElse("https://localhost/").get()
+            require(apiUrl.startsWith("https://") && !apiUrl.contains('"') && !apiUrl.contains('\\')) { "apiBaseUrl must be an HTTPS URL" }
+            buildConfigField("String", "API_BASE_URL", "\"${apiUrl.trimEnd('/')}/\"")
+            manifestPlaceholders["usesCleartextTraffic"] = "false"
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -38,6 +46,7 @@ android {
         jvmToolchain(21)
     }
     buildFeatures {
+        buildConfig = true
         compose = true
         viewBinding = true
     }

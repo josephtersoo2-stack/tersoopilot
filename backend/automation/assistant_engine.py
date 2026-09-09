@@ -95,7 +95,9 @@ class TersoAssistantEngine:
         cfg = AIPromptConfig.get_active_config()
         provider = cfg.provider
         model_name = cfg.model_name
-        system_instruction = SYSTEM_INSTRUCTION + _format_page_context(page_context)
+        from django.conf import settings
+        policy = "\nAssistant mode: read-only. Explain proposed changes; direct the operator to dashboard controls." if not settings.ASSISTANT_ALLOW_WRITES else ""
+        system_instruction = SYSTEM_INSTRUCTION + policy + _format_page_context(page_context)
 
         if provider == "GEMINI":
             return cls._run_gemini_loop(

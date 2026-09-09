@@ -3,6 +3,7 @@ package com.multibrowser.antidetect.network
 import com.google.gson.annotations.SerializedName
 import com.multibrowser.antidetect.data.model.ProfileEntity
 import okhttp3.OkHttpClient
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
@@ -260,121 +261,66 @@ interface ApiService {
 }
 
 object RetrofitInstance {
-    // Candidates: 10.84.158.87 (USB Tether), 127.0.0.1 (ADB reverse), 192.168.1.45 (Local Wi-Fi)
-    private val defaultCandidates = listOf(
-        "10.84.158.87",
-        "127.0.0.1",
-        "192.168.1.45"
-    )
-
-    private val candidateHosts: List<String>
-        get() {
-            val isEmulator = android.os.Build.FINGERPRINT.startsWith("generic") ||
-                             android.os.Build.MODEL.contains("google_sdk") ||
-                             android.os.Build.HARDWARE.contains("goldfish") ||
-                             android.os.Build.HARDWARE.contains("ranchu")
-            return if (isEmulator) {
-                listOf("10.0.2.2", "127.0.0.1") + defaultCandidates
-            } else {
-                defaultCandidates
-            }
-        }
-
     @Volatile
-    var activeHost = "10.84.158.87"
+    private var endpoint = com.multibrowser.antidetect.BuildConfig.API_BASE_URL
 
-    fun setHost(host: String) {
-        val clean = host.trim().removePrefix("http://").removePrefix("https://").removeSuffix("/").substringBefore(":")
-        if (clean.isNotBlank()) {
-            activeHost = clean
+    val activeHost: String get() = endpoint
+
+    @Synchronized
+    fun setHost(host: String, clearCredentials: Boolean = true) {
+        val value = host.trim().trimEnd('/')
+        val candidate = if (value.contains("://")) value else {
+            if (com.multibrowser.antidetect.BuildConfig.DEBUG) "http://$value:8000" else "https://$value"
+        }
+        val url = candidate.toHttpUrl()
+        require(url.username.isEmpty() && url.password.isEmpty()) { "Credentials are not allowed in server URLs." }
+        require(url.query == null && url.fragment == null && url.encodedPath == "/") { "Use a server origin without a path or query." }
+        require(com.multibrowser.antidetect.BuildConfig.DEBUG || url.isHttps) { "HTTPS is required in release builds." }
+        val normalized = url.toString()
+        if (endpoint != normalized) {
+            // An account token belongs to one server, never forward it after a server change.
+            if (clearCredentials) AuthManager.logout()
+            endpoint = normalized
             _retrofit = null
             _api = null
         }
     }
 
-    @Volatile
-    private var _retrofit: Retrofit? = null
-
-    @Volatile
-    private var _api: ApiService? = null
+    @Volatile private var _retrofit: Retrofit? = null
+    @Volatile private var _api: ApiService? = null
 
     val retrofit: Retrofit
-        get() {
-            return _retrofit ?: synchronized(this) {
+        get() = _retrofit ?: synchronized(this) {
+            _retrofit ?: run {
                 val logging = HttpLoggingInterceptor().apply {
-                    level = HttpLoggingInterceptor.Level.BASIC
+                    level = if (com.multibrowser.antidetect.BuildConfig.DEBUG) HttpLoggingInterceptor.Level.BASIC else HttpLoggingInterceptor.Level.NONE
+                    redactHeader("Authorization")
                 }
-
-                val authInterceptor = okhttp3.Interceptor { chain ->
-                    val original = chain.request()
-                    val token = AuthManager.getAuthToken()
-                    val req = if (!token.isNullOrBlank()) {
-                        original.newBuilder()
-                            .header("Authorization", "Token $token")
-                            .build()
-                    } else {
-                        original
-                    }
-                    chain.proceed(req)
-                }
-
-                val fallbackInterceptor = okhttp3.Interceptor { chain ->
-                    val originalRequest = chain.request()
-                    var lastException: java.io.IOException? = null
-
-                    // Try current activeHost first, then fallback to others
-                    val hostsToTry = linkedSetOf(activeHost) + candidateHosts
-
-                    for (host in hostsToTry) {
-                        val newUrl = originalRequest.url.newBuilder()
-                            .host(host)
-                            .port(8000)
-                            .build()
-                        val newRequest = originalRequest.newBuilder()
-                            .url(newUrl)
-                            .build()
-
-                        try {
-                            val attemptChain = chain.withConnectTimeout(2500, TimeUnit.MILLISECONDS)
-                            val response = attemptChain.proceed(newRequest)
-                            if (response.isSuccessful || response.code < 500) {
-                                activeHost = host
-                                return@Interceptor response
-                            }
-                            return@Interceptor response
-                        } catch (e: java.io.IOException) {
-                            lastException = e
+                val clientEndpoint = endpoint
+                val client = OkHttpClient.Builder()
+                    .addInterceptor { chain ->
+                        check(clientEndpoint == endpoint) { "Server changed; recreate the API client." }
+                        val request = chain.request().newBuilder()
+                        AuthManager.getAuthToken()?.takeIf { it.isNotBlank() }?.let {
+                            request.header("Authorization", "Token $it")
                         }
+                        chain.proceed(request.build())
                     }
-
-                    throw lastException ?: java.io.IOException("Failed to connect to backend on any host: $candidateHosts")
-                }
-
-                val okHttp = OkHttpClient.Builder()
-                    .addInterceptor(authInterceptor)
-                    .addInterceptor(fallbackInterceptor)
                     .addInterceptor(logging)
+                    .followRedirects(false)
+                    .followSslRedirects(false)
+                    .retryOnConnectionFailure(false)
                     .connectTimeout(10, TimeUnit.SECONDS)
                     .readTimeout(60, TimeUnit.SECONDS)
                     .writeTimeout(30, TimeUnit.SECONDS)
                     .build()
-
-                val r = Retrofit.Builder()
-                    .baseUrl("http://127.0.0.1:8000/")
-                    .client(okHttp)
-                    .addConverterFactory(GsonConverterFactory.create())
-                    .build()
-                _retrofit = r
-                r
+                Retrofit.Builder().baseUrl(endpoint).client(client)
+                    .addConverterFactory(GsonConverterFactory.create()).build().also { _retrofit = it }
             }
         }
 
     val api: ApiService
-        get() {
-            return _api ?: synchronized(this) {
-                val service = retrofit.create(ApiService::class.java)
-                _api = service
-                service
-            }
+        get() = _api ?: synchronized(this) {
+            _api ?: retrofit.create(ApiService::class.java).also { _api = it }
         }
 }

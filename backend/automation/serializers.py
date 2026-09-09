@@ -22,6 +22,7 @@ class ProfilePersonaSerializer(serializers.ModelSerializer):
 
 class ProfileNicheAffiliationSerializer(serializers.ModelSerializer):
     niche_name = serializers.ReadOnlyField(source="niche.name")
+    weight_percentage = serializers.IntegerField(min_value=0, max_value=100)
 
     class Meta:
         model = ProfileNicheAffiliation
@@ -33,6 +34,17 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
     class Meta:
         model = AutomationTask
         fields = "__all__"
+
+    def validate_config(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("Task config must be an object.")
+        for name, maximum in (("min_watch_seconds", 3600), ("max_watch_seconds", 3600),
+                              ("shorts_count", 100), ("rabbit_hole_depth", 50), ("max_search_scroll_depth", 100)):
+            if name in value and (isinstance(value[name], bool) or not isinstance(value[name], int) or not 1 <= value[name] <= maximum):
+                raise serializers.ValidationError(f"{name} must be an integer between 1 and {maximum}.")
+        if value.get("min_watch_seconds", 90) > value.get("max_watch_seconds", 240):
+            raise serializers.ValidationError("Minimum watch duration must not exceed maximum duration.")
+        return value
 
 class TaskExecutionQueueSerializer(serializers.ModelSerializer):
     profile_name = serializers.ReadOnlyField(source="profile.name")

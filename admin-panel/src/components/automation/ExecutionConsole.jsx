@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import axios from '../../api';
 import { 
   Activity, 
   StopCircle, 
@@ -33,11 +33,11 @@ export default function ExecutionConsole({ onOpenDispatch }) {
     loadJobs();
     const interval = setInterval(loadJobs, 4000);
     return () => clearInterval(interval);
-  }, []);
+  }, [activeJobId]);
 
   const loadJobs = async () => {
     try {
-      const res = await axios.get('http://localhost:8000/api/automation/ghostpilot/');
+      const res = await axios.get('automation/ghostpilot/');
       setJobs(res.data);
       if (res.data.length > 0 && !activeJobId) {
         selectJob(res.data[0].id, res.data[0].logs, res.data[0].current_state_id, res.data[0].status);
@@ -56,35 +56,31 @@ export default function ExecutionConsole({ onOpenDispatch }) {
 
   useEffect(() => {
     if (!activeJobId) return;
-
-    const eventSource = new EventSource(`http://localhost:8000/api/automation/ghostpilot/${activeJobId}/stream/`);
-
-    eventSource.onmessage = (event) => {
+    let stopped = false;
+    let timer;
+    const controller = new AbortController();
+    const refresh = async () => {
       try {
-        const data = JSON.parse(event.data);
-        setActiveState(data.current_state);
-        setJobStatus(data.status);
-        if (data.new_logs && data.new_logs.length > 0) {
-          setLiveLogs((prev) => [...prev, ...data.new_logs]);
+        const { data } = await axios.get(`automation/ghostpilot/${activeJobId}/`, { signal: controller.signal });
+        if (!stopped) {
+          setLiveLogs(data.logs || []);
+          setActiveState(data.current_state_id || '');
+          setJobStatus(data.status || '');
         }
-      } catch (e) {
-        console.error('Error parsing SSE event:', e);
+      } catch (error) {
+        if (!stopped) console.error('Could not refresh execution details:', error.message);
+      } finally {
+        if (!stopped) timer = setTimeout(refresh, 2000);
       }
     };
-
-    eventSource.onerror = () => {
-      eventSource.close();
-    };
-
-    return () => {
-      eventSource.close();
-    };
+    refresh();
+    return () => { stopped = true; clearTimeout(timer); controller.abort(); };
   }, [activeJobId]);
 
   const handleAbort = async (jobId) => {
     if (!window.confirm('Emergency Abort this execution?')) return;
     try {
-      await axios.post(`http://localhost:8000/api/automation/ghostpilot/${jobId}/abort/`);
+      await axios.post(`automation/ghostpilot/${jobId}/abort/`);
       loadJobs();
     } catch (err) {
       alert('Abort failed: ' + err.message);

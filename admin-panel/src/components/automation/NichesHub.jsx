@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import axios from '../../api';
 import { Tag, Globe, Youtube, Plus, Trash2, Save, Layers, Sparkles } from 'lucide-react';
 
-const API_NICHES = 'http://localhost:8000/api/automation/niches/';
+const API_NICHES = 'automation/niches/';
 
 export default function NichesHub() {
   const [niches, setNiches] = useState([]);

@@ -29,15 +29,14 @@ object AuthManager {
     fun init(context: Context) {
         if (prefs == null) {
             prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val token = prefs?.getString(KEY_TOKEN, null)
+            val savedHost = prefs?.getString(KEY_SERVER_HOST, null)
+            if (!savedHost.isNullOrBlank()) {
+                try { RetrofitInstance.setHost(savedHost, clearCredentials = false) } catch (_: IllegalArgumentException) { logout() }
+            }
+            val token = getAuthToken()
             val username = prefs?.getString(KEY_USERNAME, null)
             val id = prefs?.getInt(KEY_USER_ID, -1) ?: -1
             val email = prefs?.getString(KEY_EMAIL, null)
-
-            val savedHost = prefs?.getString(KEY_SERVER_HOST, null)
-            if (!savedHost.isNullOrBlank()) {
-                RetrofitInstance.setHost(savedHost)
-            }
 
             if (!token.isNullOrBlank() && !username.isNullOrBlank()) {
                 _isLoggedIn.value = true
@@ -52,12 +51,21 @@ object AuthManager {
     }
 
     fun getAuthToken(): String? {
-        return prefs?.getString(KEY_TOKEN, null)
+        val stored = prefs?.getString(KEY_TOKEN, null) ?: return null
+        return try {
+            if (stored.startsWith("v1:")) TokenVault.decrypt(stored) else {
+                prefs?.edit()?.putString(KEY_TOKEN, TokenVault.encrypt(stored))?.apply()
+                stored
+            }
+        } catch (_: Exception) {
+            logout()
+            null
+        }
     }
 
     fun saveAuth(token: String, user: UserDto) {
         prefs?.edit()?.apply {
-            putString(KEY_TOKEN, token)
+            putString(KEY_TOKEN, TokenVault.encrypt(token))
             putInt(KEY_USER_ID, user.id)
             putString(KEY_USERNAME, user.username)
             putString(KEY_EMAIL, user.email ?: "")
@@ -80,15 +88,7 @@ object AuthManager {
     }
 
     fun saveServerHost(host: String) {
-        val cleanHost = host.trim()
-            .removePrefix("http://")
-            .removePrefix("https://")
-            .removeSuffix("/")
-            .substringBefore(":")
-            .trim()
-        if (cleanHost.isNotBlank()) {
-            prefs?.edit()?.putString(KEY_SERVER_HOST, cleanHost)?.apply()
-            RetrofitInstance.setHost(cleanHost)
-        }
+        RetrofitInstance.setHost(host)
+        prefs?.edit()?.putString(KEY_SERVER_HOST, RetrofitInstance.activeHost)?.apply()
     }
 }

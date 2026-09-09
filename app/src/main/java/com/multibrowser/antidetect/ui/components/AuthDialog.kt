@@ -403,7 +403,7 @@ fun AuthDialog(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            "Backend: ${RetrofitInstance.activeHost}:8000",
+                            "Backend: ${RetrofitInstance.activeHost}",
                             style = MaterialTheme.typography.labelSmall,
                             color = OctoTextMuted
                         )
@@ -425,7 +425,7 @@ fun AuthDialog(
                             .padding(12.dp)
                     ) {
                         Text(
-                            "Backend Server IP / Host",
+                            "Backend Server URL",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = OctoTextPrimary
@@ -435,14 +435,22 @@ fun AuthDialog(
                             value = serverHostInput,
                             onValueChange = {
                                 serverHostInput = it
-                                AuthManager.saveServerHost(it)
                             },
-                            placeholder = { Text("10.84.158.87 or 127.0.0.1") },
+                            placeholder = { Text("https://api.example.com") },
                             singleLine = true,
                             shape = RoundedCornerShape(8.dp),
                             colors = octoTextFieldColors(),
                             modifier = Modifier.fillMaxWidth()
                         )
+                        Button(onClick = {
+                            try {
+                                AuthManager.saveServerHost(serverHostInput)
+                                serverHostInput = AuthManager.getServerHost()
+                                errorMessage = null
+                            } catch (e: IllegalArgumentException) {
+                                errorMessage = e.message ?: "Enter a valid server URL."
+                            }
+                        }) { Text("Save server") }
                         Spacer(modifier = Modifier.height(8.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -451,14 +459,14 @@ fun AuthDialog(
                             AssistChip(
                                 onClick = {
                                     serverHostInput = "10.84.158.87"
-                                    AuthManager.saveServerHost("10.84.158.87")
+
                                 },
                                 label = { Text("USB: 10.84.158.87", style = MaterialTheme.typography.labelSmall) }
                             )
                             AssistChip(
                                 onClick = {
                                     serverHostInput = "127.0.0.1"
-                                    AuthManager.saveServerHost("127.0.0.1")
+
                                 },
                                 label = { Text("ADB: 127.0.0.1", style = MaterialTheme.typography.labelSmall) }
                             )

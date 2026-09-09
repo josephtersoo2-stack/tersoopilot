@@ -64,14 +64,7 @@ object CookieEngine {
             if (!exists()) mkdirs()
         }
 
-        // 1. Flush any orphan WAL files that would cause SQLite locks
-        try {
-            File(profileDir, "cookies.sqlite-wal").delete()
-            File(profileDir, "cookies.sqlite-shm").delete()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
+        // SQLite owns WAL/SHM recovery. Deleting these files can lose committed cookies.
         // 2. Normalize input: parse either standard JSON array or line-delimited Netscape format
         val cookiesArray = parseToStandardJsonArray(rawJsonOrNetscape)
 
@@ -132,12 +125,12 @@ object CookieEngine {
                     put("creationTime", nowMicroseconds)
                 }
 
-                db.insertWithOnConflict("moz_cookies", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                check(db.insertWithOnConflict("moz_cookies", null, cv, SQLiteDatabase.CONFLICT_REPLACE) != -1L) { "Cookie insert failed" }
                 importedCount++
             }
             db.setTransactionSuccessful()
         } finally {
-            db.endTransaction()
+            if (db.inTransaction()) db.endTransaction()
             db.close()
         }
 
@@ -156,8 +149,9 @@ object CookieEngine {
 
         // Netscape format fallback: domain \t flag \t path \t secure \t expiry \t name \t value
         val result = JSONArray()
-        trimmed.lines().forEach { line ->
-            val l = line.trim()
+        raw.lines().forEach { line ->
+            val httpOnly = line.startsWith("#HttpOnly_")
+            val l = line.removePrefix("#HttpOnly_").trimEnd('\r')
             if (l.isNotEmpty() && !l.startsWith("#")) {
                 val parts = l.split("\t")
                 if (parts.size >= 7) {
@@ -168,7 +162,7 @@ object CookieEngine {
                         put("expiry", parts[4].toLongOrNull() ?: ((System.currentTimeMillis() / 1000) + 31536000))
                         put("name", parts[5])
                         put("value", parts[6])
-                        put("isHttpOnly", false)
+                        put("isHttpOnly", httpOnly)
                         put("sameSite", 0)
                     }
                     result.put(obj)

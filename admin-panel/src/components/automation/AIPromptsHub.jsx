@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import axios from '../../api';
 import { 
   Sparkles, 
   Save, 
@@ -15,8 +15,8 @@ import {
 } from 'lucide-react';
 import { fetchGlobalSettings, updateGlobalSettings, fetchAvailableModels } from '../../api';
 
-const API_ACTIVE = 'http://localhost:8000/api/automation/ai-config/active/';
-const API_BASE = 'http://localhost:8000/api/automation/ai-config/';
+const API_ACTIVE = 'automation/ai-config/active/';
+const API_BASE = 'automation/ai-config/';
 
 export default function AIPromptsHub({ onSaved }) {
   const [activePromptTab, setActivePromptTab] = useState('TASK_RECOVERY'); // 'TASK_RECOVERY' or 'PROFILE_GEN'

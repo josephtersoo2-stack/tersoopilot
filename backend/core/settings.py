@@ -1,14 +1,18 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
-
-load_dotenv()
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
-SECRET_KEY = os.getenv("SECRET_KEY", "insecure-key-for-dev")
-DEBUG = os.getenv("DEBUG", "True") == "True"
-ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "*").split(",")
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    if not DEBUG:
+        raise ImproperlyConfigured("Set SECRET_KEY before starting the backend.")
+    SECRET_KEY = "development-only-do-not-deploy-this-key"
+ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]").split(",") if h.strip()]
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -81,9 +85,29 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # CORS configuration for Android app & local testing
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOWED_ORIGINS = [v.strip() for v in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if v.strip()]
+CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SECURE_SSL_REDIRECT = os.getenv("SECURE_SSL_REDIRECT", str(not DEBUG)).lower() == "true"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+DATA_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
+
+if os.getenv("POSTGRES_DB"):
+    DATABASES["default"] = {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ["POSTGRES_DB"],
+        "USER": os.getenv("POSTGRES_USER", "tersoopilot"),
+        "PASSWORD": os.getenv("POSTGRES_PASSWORD", ""),
+        "HOST": os.getenv("POSTGRES_HOST", "localhost"),
+        "PORT": os.getenv("POSTGRES_PORT", "5432"),
+        "CONN_MAX_AGE": 60,
+    }
 
 REST_FRAMEWORK = {
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
+    "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.ScopedRateThrottle"],
+    "DEFAULT_THROTTLE_RATES": {"auth": "10/min", "ai": "20/min"},
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.TokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
@@ -95,3 +119,5 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.JSONParser",
     ],
 }
+
+ASSISTANT_ALLOW_WRITES = os.getenv("ASSISTANT_ALLOW_WRITES", "False").lower() == "true"

@@ -1,3 +1,4 @@
+import json
 from rest_framework import serializers
 from .models import SavedProfile, GlobalSetting
 
@@ -53,6 +54,28 @@ class SavedProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = SavedProfile
         fields = "__all__"
+        read_only_fields = ["user", "cookie_count", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        for field in ("cookies_data", "history_data", "tabs_data"):
+            if field in attrs:
+                try:
+                    items = json.loads(attrs[field])
+                except (ValueError, TypeError):
+                    raise serializers.ValidationError({field: "Must contain a JSON array."})
+                if not isinstance(items, list) or len(items) > 10000:
+                    raise serializers.ValidationError({field: "Must contain an array of at most 10000 items."})
+                if field == "cookies_data":
+                    validator = CookieImportExportSerializer(data={"cookies": items})
+                    validator.is_valid(raise_exception=True)
+                    attrs["cookie_count"] = len(items)
+        for field, low, high in (("android_version", 1, 100), ("ram_gb", 1, 1024),
+                                  ("cpu_cores", 1, 256), ("screen_width", 1, 32768),
+                                  ("screen_height", 1, 32768), ("dpr", 0.1, 16),
+                                  ("proxy_port", 0, 65535), ("last_used_timestamp", 0, 2**63-1)):
+            if field in attrs and not low <= attrs[field] <= high:
+                raise serializers.ValidationError({field: f"Must be between {low} and {high}."})
+        return attrs
 
 class CookieImportExportSerializer(serializers.Serializer):
     cookies = serializers.ListField(

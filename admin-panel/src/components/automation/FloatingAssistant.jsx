@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
+import axios from '../../api';
 import {
   MessageCircle,
   Send,
@@ -25,7 +25,7 @@ import {
   FileCheck
 } from 'lucide-react';
 
-const API_BASE = 'http://localhost:8000/api/automation/assistant';
+const API_BASE = 'automation/assistant';
 
 export default function FloatingAssistant({
   activeTab = 'PROFILES',

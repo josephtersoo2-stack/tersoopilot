@@ -6,6 +6,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, viewsets
 from .models import SavedProfile, GlobalSetting
+from core.permissions import AdminWritePermission, visible_profiles
+from django.core.exceptions import ValidationError
 from .serializers import (
     DeviceGenerateRequestSerializer,
     DeviceFingerprintResponseSerializer,
@@ -17,6 +19,7 @@ from .serializers import (
 from .services import generate_device_specs_with_llm, fetch_available_models_from_provider
 
 class GlobalSettingView(APIView):
+    permission_classes = [AdminWritePermission]
     def get(self, request):
         settings = GlobalSetting.load()
         serializer = GlobalSettingSerializer(settings)
@@ -49,6 +52,7 @@ class GlobalSettingView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class AvailableModelsView(APIView):
+    throttle_scope = "ai"
     """
     Fetches all available models directly from the selected AI provider.
     No models are hardcoded.
@@ -65,6 +69,7 @@ class AvailableModelsView(APIView):
             )
 
 class GenerateDeviceProfileView(APIView):
+    throttle_scope = "ai"
     def post(self, request):
         input_serializer = DeviceGenerateRequestSerializer(data=request.data)
         if not input_serializer.is_valid():
@@ -145,28 +150,22 @@ class SavedProfileViewSet(viewsets.ModelViewSet):
     serializer_class = SavedProfileSerializer
 
     def get_queryset(self):
-        user = self.request.user
-        if user and user.is_authenticated:
-            from django.db.models import Q
-            return SavedProfile.objects.filter(Q(user=user) | Q(user__isnull=True)).order_by("-updated_at")
-        return SavedProfile.objects.all().order_by("-updated_at")
+        return visible_profiles(self.request.user).order_by("-updated_at")
 
     def perform_create(self, serializer):
-        user = self.request.user
-        if user and user.is_authenticated:
-            serializer.save(user=user)
-        else:
-            serializer.save()
+        serializer.save(user=self.request.user)
 
-def get_profile_for_cookies(profile_id):
-    profile = None
+
+def get_profile_for_cookies(profile_id, user):
+    profiles = visible_profiles(user)
     try:
-        profile = SavedProfile.objects.filter(id=profile_id).first()
-    except Exception:
+        profile = profiles.filter(id=profile_id).first()
+        if profile:
+            return profile
+    except (ValidationError, ValueError):
         pass
-    if not profile:
-        profile = SavedProfile.objects.filter(device_sync_id=profile_id).first()
-    return profile
+    matches = list(profiles.filter(device_sync_id=profile_id)[:2])
+    return matches[0] if len(matches) == 1 else None
 
 class ProfileCookieExportView(APIView):
     """
@@ -174,7 +173,7 @@ class ProfileCookieExportView(APIView):
     GET /api/profiles/<profile_id>/cookies/export/?download=true
     """
     def get(self, request, profile_id):
-        profile = get_profile_for_cookies(profile_id)
+        profile = get_profile_for_cookies(profile_id, request.user)
         if not profile:
             return Response({"error": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -187,7 +186,7 @@ class ProfileCookieExportView(APIView):
         # Check if user requested direct file attachment
         as_file = request.query_params.get("download", "false").lower() == "true"
         if as_file:
-            clean_name = profile.name.replace(" ", "_").replace("/", "_")
+            clean_name = str(profile.id)
             response = HttpResponse(
                 json.dumps(cookies_data, indent=2),
                 content_type="application/json"
@@ -208,28 +207,9 @@ class ProfileCookieImportView(APIView):
     POST /api/profiles/<profile_id>/cookies/import/
     """
     def post(self, request, profile_id):
-        profile = get_profile_for_cookies(profile_id)
+        profile = get_profile_for_cookies(profile_id, request.user)
         if not profile:
-            try:
-                p_uuid = uuid.UUID(str(profile_id))
-            except Exception:
-                p_uuid = uuid.uuid4()
-            user = request.user if (request.user and request.user.is_authenticated) else None
-            profile = SavedProfile.objects.create(
-                id=p_uuid,
-                user=user,
-                name=f"Profile {str(profile_id)[:8]}",
-                device_sync_id=str(profile_id),
-                brand="Android",
-                model_name="Generic Device",
-                model_code="SM-Generic",
-                soc="Octa-Core",
-                webgl_vendor="ARM",
-                webgl_renderer="Mali-G68",
-                user_agent="Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
-                cookies_data="[]",
-                cookie_count=0
-            )
+            return Response({"error": "Profile not found. Sync it before importing cookies."}, status=404)
 
         serializer = CookieImportExportSerializer(data=request.data)
         if not serializer.is_valid():

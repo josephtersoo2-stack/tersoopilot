@@ -1,3 +1,5 @@
+import { parseCookies } from '../../lib/cookies';
+import { downloadCookies } from '../../api';
 import React, { useState } from 'react';
 import { 
   Users, 
@@ -50,35 +52,14 @@ export default function ProfilesHub({
   };
 
   const handleDownloadCookies = (profileId) => {
-    window.open(`http://localhost:8000/api/profiles/${profileId}/cookies/export/?download=true`, '_blank');
+    downloadCookies(profileId).catch((err) => alert('Cookie export failed: ' + err.message));
   };
 
   const handleImportSubmit = async () => {
     if (!activeProfileForImport || !importJsonText.trim()) return;
     setIsSubmittingImport(true);
     try {
-      let cookiesPayload = [];
-      const trimmed = importJsonText.trim();
-      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-        cookiesPayload = JSON.parse(trimmed);
-      } else {
-        trimmed.split('\n').forEach(line => {
-          const l = line.trim();
-          if (l && !l.startsWith('#')) {
-            const parts = l.split('\t');
-            if (parts.length >= 7) {
-              cookiesPayload.push({
-                domain: parts[0],
-                path: parts[2],
-                isSecure: parts[3].toUpperCase() === 'TRUE',
-                expiry: parseInt(parts[4]) || Math.floor(Date.now() / 1000) + 31536000,
-                name: parts[5],
-                value: parts[6]
-              });
-            }
-          }
-        });
-      }
+      const cookiesPayload = parseCookies(importJsonText);
 
       if (!Array.isArray(cookiesPayload) || cookiesPayload.length === 0) {
         if (showNotification) showNotification('No valid cookies detected.', 'error');

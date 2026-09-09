@@ -1,4 +1,5 @@
-import json
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from rest_framework.views import APIView
@@ -9,10 +10,11 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 
 class RegisterView(APIView):
     permission_classes = [AllowAny]
+    throttle_scope = "auth"
 
     def post(self, request):
         username = request.data.get("username", "").strip()
-        password = request.data.get("password", "").strip()
+        password = request.data.get("password", "")
         email = request.data.get("email", "").strip()
 
         if not username or not password:
@@ -21,11 +23,10 @@ class RegisterView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        if len(password) < 4:
-            return Response(
-                {"error": "Password must be at least 4 characters long.", "code": "PASSWORD_TOO_SHORT"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        try:
+            validate_password(password, User(username=username, email=email))
+        except ValidationError as exc:
+            return Response({"error": " ".join(exc.messages), "code": "WEAK_PASSWORD"}, status=400)
 
         if User.objects.filter(username__iexact=username).exists():
             return Response(
@@ -61,10 +62,11 @@ class RegisterView(APIView):
 
 class LoginView(APIView):
     permission_classes = [AllowAny]
+    throttle_scope = "auth"
 
     def post(self, request):
         username = request.data.get("username", "").strip()
-        password = request.data.get("password", "").strip()
+        password = request.data.get("password", "")
 
         if not username or not password:
             return Response(
@@ -73,24 +75,9 @@ class LoginView(APIView):
             )
 
         existing_user = User.objects.filter(username__iexact=username).first()
-        if not existing_user:
-            return Response(
-                {
-                    "error": f"Account '{username}' was not found. Please tap the 'Register' tab to create this account.",
-                    "code": "USER_NOT_FOUND"
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        user = authenticate(username=existing_user.username, password=password)
+        user = authenticate(username=existing_user.username if existing_user else username, password=password)
         if not user:
-            return Response(
-                {
-                    "error": "Incorrect password. Please verify your password and try again.",
-                    "code": "INVALID_PASSWORD"
-                },
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({"error": "Invalid username or password.", "code": "INVALID_CREDENTIALS"}, status=400)
 
         token, _ = Token.objects.get_or_create(user=user)
         return Response(
@@ -120,6 +107,15 @@ class UserMeView(APIView):
                 "username": user.username,
                 "email": user.email,
                 "profile_count": profile_count,
+                "is_staff": user.is_staff,
             },
             status=status.HTTP_200_OK
         )
+
+
+class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        Token.objects.filter(user=request.user).delete()
+        return Response({"status": "logged_out"})

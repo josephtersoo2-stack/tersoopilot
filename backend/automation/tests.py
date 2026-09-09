@@ -1,7 +1,8 @@
 import uuid
 import json
 from unittest.mock import patch, MagicMock
-from django.test import TestCase
+from django.test import TestCase, override_settings
+from django.contrib.auth.models import User
 from rest_framework.test import APIClient
 from rest_framework import status
 from devices.models import SavedProfile
@@ -27,6 +28,8 @@ from .decision_engine import (
 class AutomationEngineTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.operator, _ = User.objects.get_or_create(username="test-operator", defaults={"is_staff": True})
+        self.client.force_authenticate(self.operator)
         self.profile = SavedProfile.objects.create(
             name="Alpha Device",
             brand="Samsung",
@@ -146,6 +149,8 @@ class AutomationEngineTests(TestCase):
 class DAGCompilerTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.operator, _ = User.objects.get_or_create(username="test-operator", defaults={"is_staff": True})
+        self.client.force_authenticate(self.operator)
         self.profile = SavedProfile.objects.create(
             name="Compiler Test Device",
             brand="Google",
@@ -230,6 +235,8 @@ class DAGCompilerTests(TestCase):
 class GhostPilotFleetControlTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.operator, _ = User.objects.get_or_create(username="test-operator", defaults={"is_staff": True})
+        self.client.force_authenticate(self.operator)
         self.profile = SavedProfile.objects.create(
             name="Fleet Control Device",
             brand="Google",
@@ -415,6 +422,8 @@ class GhostPilotFleetControlTests(TestCase):
 class GhostPilotDecisionEngineTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.operator, _ = User.objects.get_or_create(username="test-operator", defaults={"is_staff": True})
+        self.client.force_authenticate(self.operator)
         self.profile = SavedProfile.objects.create(
             name="Decision Test Device",
             brand="Samsung",
@@ -440,7 +449,7 @@ class GhostPilotDecisionEngineTests(TestCase):
             task=self.task,
             profile=self.profile,
             current_state_id="yt_monitor_playback",
-            compiled_dag={"entry_state": "start", "states": {}}
+            compiled_dag={"entry_state": "start", "states": {"start": {"command": "WAIT"}, "yt_monitor_playback": {"command": "WAIT_PLAYBACK"}}}
         )
 
     def test_decision_heuristic_fallback_when_no_keys(self):
@@ -566,6 +575,8 @@ class GhostPilotDecisionEngineTests(TestCase):
 class DynamicAIPromptConfigTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.operator, _ = User.objects.get_or_create(username="test-operator", defaults={"is_staff": True})
+        self.client.force_authenticate(self.operator)
         self.profile = SavedProfile.objects.create(
             name="Config Test Device",
             brand="Samsung",
@@ -590,7 +601,7 @@ class DynamicAIPromptConfigTests(TestCase):
             task=self.task,
             profile=self.profile,
             current_state_id="yt_monitor_playback",
-            compiled_dag={"entry_state": "start", "states": {}}
+            compiled_dag={"entry_state": "start", "states": {"start": {"command": "WAIT"}, "yt_monitor_playback": {"command": "WAIT_PLAYBACK"}}}
         )
 
     def test_auto_seed_default_config(self):
@@ -665,11 +676,14 @@ class DynamicAIPromptConfigTests(TestCase):
         self.assertTrue(new_config.is_active)
 
 
+@override_settings(ASSISTANT_ALLOW_WRITES=True)
 class TersoAssistantEngineTests(TestCase):
     """Tests for the TersoAssistant tool-calling conversational engine."""
 
     def setUp(self):
         self.client = APIClient()
+        self.operator, _ = User.objects.get_or_create(username="test-operator", defaults={"is_staff": True})
+        self.client.force_authenticate(self.operator)
         self.profile = SavedProfile.objects.create(
             name="Assistant Test Device",
             brand="Samsung",
@@ -700,7 +714,7 @@ class TersoAssistantEngineTests(TestCase):
             profile=self.profile,
             status=TaskExecutionQueue.ExecutionStatus.RUNNING,
             entry_state_id="start",
-            compiled_dag={"entry_state": "start", "states": {}},
+            compiled_dag={"entry_state": "start", "states": {"start": {"command": "WAIT"}, "yt_monitor_playback": {"command": "WAIT_PLAYBACK"}}},
             current_state_id="yt_monitor_playback",
             logs=[{"type": "INIT", "msg": "Job started"}]
         )

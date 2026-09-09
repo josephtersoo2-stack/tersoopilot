@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import axios from '../../api';
 import { 
   ShieldCheck, 
   Zap, 
@@ -43,9 +43,9 @@ export default function PersonaModal({ profile, onClose, onUpdated }) {
     setIsLoading(true);
     try {
       const [personaRes, nichesRes, currentNichesRes] = await Promise.all([
-        axios.get(`http://localhost:8000/api/automation/profiles-orchestration/${profile.id}/get-persona/`),
-        axios.get(`http://localhost:8000/api/automation/niches/`),
-        axios.get(`http://localhost:8000/api/automation/profiles-orchestration/${profile.id}/get-niches/`)
+        axios.get(`automation/profiles-orchestration/${profile.id}/get-persona/`),
+        axios.get(`automation/niches/`),
+        axios.get(`automation/profiles-orchestration/${profile.id}/get-niches/`)
       ]);
 
       const p = personaRes.data;
@@ -141,11 +141,11 @@ export default function PersonaModal({ profile, onClose, onUpdated }) {
     try {
       await Promise.all([
         axios.post(
-          `http://localhost:8000/api/automation/profiles-orchestration/${profile.id}/set-persona/`,
+          `automation/profiles-orchestration/${profile.id}/set-persona/`,
           personaPayload
         ),
         axios.post(
-          `http://localhost:8000/api/automation/profiles-orchestration/${profile.id}/set-niches/`,
+          `automation/profiles-orchestration/${profile.id}/set-niches/`,
           nichesPayload
         )
       ]);

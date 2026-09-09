@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import axios from 'axios';
+import axios from './api';
 import Sidebar from './components/layout/Sidebar';
 import TopBar from './components/layout/TopBar';
 import ExecutionConsole from './components/automation/ExecutionConsole';
@@ -14,7 +14,7 @@ import PersonaModal from './components/automation/PersonaModal';
 import TaskDispatchModal from './components/automation/TaskDispatchModal';
 import { fetchGlobalSettings } from './api';
 
-export default function App() {
+export default function App({ onLogout }) {
   const [activeTab, setActiveTab] = useState('EXECUTION');
   const [profiles, setProfiles] = useState([]);
   const [settings, setSettings] = useState({
@@ -45,11 +45,11 @@ export default function App() {
 
   const pollRunningJobs = async () => {
     try {
-      const res = await axios.get('http://localhost:8000/api/automation/ghostpilot/');
+      const res = await axios.get('automation/ghostpilot/');
       const running = res.data.filter((j) => j.status === 'RUNNING').length;
       setRunningJobsCount(running);
     } catch (e) {
-      // Ignore polling errors
+      showNotification('Cannot refresh execution status. Check the backend connection.', 'error');
     }
   };
 
@@ -63,9 +63,9 @@ export default function App() {
     setLoading(true);
     try {
       const [settRes, profRes, ghostRes] = await Promise.all([
-        fetchGlobalSettings().catch(() => ({ data: {} })),
-        axios.get('http://localhost:8000/api/profiles/').catch(() => ({ data: [] })),
-        axios.get('http://localhost:8000/api/automation/ghostpilot/').catch(() => ({ data: [] }))
+        fetchGlobalSettings(),
+        axios.get('profiles/'),
+        axios.get('automation/ghostpilot/')
       ]);
 
       if (settRes.data && Object.keys(settRes.data).length > 0) {
@@ -84,7 +84,7 @@ export default function App() {
 
   const loadProfiles = async () => {
     try {
-      const res = await axios.get('http://localhost:8000/api/profiles/');
+      const res = await axios.get('profiles/');
       setProfiles(res.data || []);
     } catch (err) {
       console.error('Failed to refresh profiles:', err);
@@ -115,6 +115,7 @@ export default function App() {
 
       {/* 2. Main Content Workspace */}
       <div className="flex-1 flex flex-col min-w-0 overflow-x-hidden">
+        <div className="flex justify-end px-8 pt-3"><button onClick={onLogout} className="text-sm text-neutral-300 hover:text-white">Sign out</button></div>
         {/* Top Header Bar */}
         <TopBar
           activeTab={activeTab}

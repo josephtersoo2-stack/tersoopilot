@@ -361,6 +361,28 @@ def tool_execute_task_on_profiles(
 # Tool Dispatch Router
 # ---------------------------------------------------------------------------
 
+# Apply the same server-controlled write policy to Gemini callables and the
+# OpenRouter dispatcher. Model-generated arguments cannot enable write access.
+from functools import wraps
+from django.conf import settings
+
+
+def _controlled_write(function):
+    @wraps(function)
+    def guarded(*args, **kwargs):
+        if not settings.ASSISTANT_ALLOW_WRITES:
+            return {"error": "Assistant is in read-only mode. Use the dashboard controls for changes."}
+        return function(*args, **kwargs)
+    return guarded
+
+
+tool_create_niche = _controlled_write(tool_create_niche)
+tool_set_profile_niches = _controlled_write(tool_set_profile_niches)
+tool_assign_niche_to_profile = _controlled_write(tool_assign_niche_to_profile)
+tool_dispatch_campaign = _controlled_write(tool_dispatch_campaign)
+tool_execute_task_on_profiles = _controlled_write(tool_execute_task_on_profiles)
+tool_abort_job = _controlled_write(tool_abort_job)
+
 TOOL_MAP = {
     "get_fleet_status": tool_get_fleet_status,
     "list_profiles": tool_list_profiles,
