@@ -588,9 +588,9 @@ class RecipeCompiler:
     def compile_recipe(cls, task: AutomationTask, profile: SavedProfile) -> Dict[str, Any]:
         category = getattr(task, "category", "")
         if category in [PlatformCategory.WARMING, "WARMING"]:
-            return WarmerCompiler.compile(task, profile)
+            dag = WarmerCompiler.compile(task, profile)
         elif category in [PlatformCategory.YOUTUBE, "YOUTUBE"]:
-            return YouTubeCompiler.compile(task, profile)
+            dag = YouTubeCompiler.compile(task, profile)
         else:
             # Fallback simple navigator
             builder = DAGBuilder(entry_state="nav")
@@ -613,4 +613,8 @@ class RecipeCompiler:
                 params={},
                 on_success="exit"
             )
-            return builder.build()
+            dag = builder.build()
+
+        from .validator import DAGValidator
+        DAGValidator.validate(dag)
+        return dag

@@ -33,6 +33,8 @@ from .serializers import (
     AssistantMessageSerializer,
 )
 from .compiler import RecipeCompiler
+from .validator import DAGValidator
+from executions.services import ExecutionService
 from .decision_engine import GhostPilotDecisionEngine
 from devices.models import SavedProfile
 
@@ -74,6 +76,7 @@ class AutomationTaskViewSet(viewsets.ModelViewSet):
 
             # Compile personalized DAG
             compiled_dag = RecipeCompiler.compile_recipe(task, profile)
+            DAGValidator.validate(compiled_dag)
 
             job = TaskExecutionQueue.objects.create(
                 task=task,
@@ -125,14 +128,17 @@ class GhostPilotViewSet(viewsets.ReadOnlyModelViewSet):
             profile = matches[0] if len(matches) == 1 else None
         if not profile:
             return Response({"work_available": False})
-        pending = self.get_queryset().filter(profile=profile, status="PENDING").order_by("task__created_at")
-        for job in pending:
-            # Compare-and-swap prevents two polling clients from claiming the same job.
-            claimed = TaskExecutionQueue.objects.filter(pk=job.pk, status="PENDING").update(status="DISPATCHED", started_at=timezone.now())
-            if claimed:
-                return Response({"work_available": True, "job_id": str(job.id),
-                                 "backend_profile_id": str(job.profile_id),
-                                 "entry_state": job.entry_state_id, "dag": job.compiled_dag})
+
+        device_id = request.query_params.get("device_id")
+        job = ExecutionService.poll_next_job(profile=profile, device_id=device_id)
+        if job:
+            return Response({
+                "work_available": True,
+                "job_id": str(job.id),
+                "backend_profile_id": str(job.profile_id),
+                "entry_state": job.entry_state_id,
+                "dag": job.compiled_dag
+            })
         return Response({"work_available": False})
 
     @action(detail=False, methods=["get"], url_path="poll/(?P<profile_id>[^/.]+)")
@@ -147,158 +153,52 @@ class GhostPilotViewSet(viewsets.ReadOnlyModelViewSet):
         return self._handle_poll(request, profile_id)
 
     @action(detail=True, methods=["post"], url_path="transition")
-    @transaction.atomic
     def transition_state(self, request, pk=None):
         """
         Advance DAG state based on client execution outcome.
-        Payload:
-        {
-            "outcome": "SUCCESS" | "CONSENT_WALL" | "AD_ACTIVE" | "FAILURE",
-            "context_update": {"watch_time": 120},
-            "error": "Optional error string"
-        }
         """
         job = self.get_object()
-        job = TaskExecutionQueue.objects.select_for_update().get(pk=job.pk)
         transition_id = request.data.get("transition_id")
         if transition_id is not None and (not isinstance(transition_id, str) or len(transition_id) > 100):
             raise ValidationError({"transition_id": "Must be a string of at most 100 characters."})
-        if transition_id and any(entry.get("transition_id") == transition_id for entry in (job.logs or []) if isinstance(entry, dict)):
-            node = job.compiled_dag.get("states", {}).get(job.current_state_id, {})
-            return Response({"status": "ADVANCED", "current_state_id": job.current_state_id,
-                             "is_terminal": job.status in ("SUCCESS", "FAILED"),
-                             "command": node.get("command"), "params": node.get("params", {})})
-        if job.status in ("SUCCESS", "FAILED"):
-            return Response({"error": "Execution is already terminal."}, status=409)
+
         outcome = request.data.get("outcome", "SUCCESS")
         context_update = request.data.get("context_update", {})
         error = request.data.get("error")
         if not isinstance(context_update, dict) or not isinstance(outcome, str):
             raise ValidationError("outcome must be a string and context_update an object.")
 
-        states = job.compiled_dag.get("states", {})
-        current_node = states.get(job.current_state_id)
-
-        if not current_node:
-            job.status = TaskExecutionQueue.ExecutionStatus.FAILED
-            job.error_message = f"Node '{job.current_state_id}' not found in DAG."
-            job.save()
-            return Response({"status": "ERROR", "message": job.error_message}, status=status.HTTP_400_BAD_REQUEST)
-
-        transitions = current_node.get("transitions", {})
-        if outcome not in transitions and outcome != "FAILURE":
-            raise ValidationError({"outcome": "Outcome is not defined for the current state."})
-        next_state_id = transitions.get(outcome, transitions.get("FAILURE", "exit"))
-        if next_state_id != "exit" and next_state_id not in states:
-            raise ValidationError("Transition references a missing state.")
-
-        # Update execution context and logs
-        if not isinstance(job.execution_context, dict):
-            job.execution_context = {}
-        job.execution_context.update(context_update)
-
-        if not isinstance(job.logs, list):
-            job.logs = []
-        job.logs.append({
-            "transition_id": transition_id,
-            "from_state": job.current_state_id,
-            "outcome": outcome,
-            "to_state": next_state_id,
-            "timestamp": timezone.now().isoformat()
-        })
-
-        job.current_state_id = next_state_id
-
-        # Check for terminal state
-        terminal = next_state_id == "exit" or states.get(next_state_id, {}).get("command") == "TERMINATE"
-        if terminal and outcome == "FAILURE":
-            job.status = TaskExecutionQueue.ExecutionStatus.FAILED
-            job.error_message = error or "Execution failed at terminal state."
-            job.completed_at = timezone.now()
-        elif terminal:
-            job.status = TaskExecutionQueue.ExecutionStatus.SUCCESS
-            job.completed_at = timezone.now()
-
-            # Handle trust score increments on completion
-            complete_params = current_node.get("params", {})
-            inc = complete_params.get("increment_trust_score", 0)
-            if inc > 0 and hasattr(job.profile, "persona"):
-                persona = job.profile.persona
-                persona.trust_score = min(100, persona.trust_score + inc)
-                persona.save()
-        else:
-            job.status = TaskExecutionQueue.ExecutionStatus.RUNNING
-
-        job.save()
-
-        next_node = states.get(next_state_id, {})
-        return Response({
-            "status": "ADVANCED",
-            "current_state_id": job.current_state_id,
-            "is_terminal": job.status in [TaskExecutionQueue.ExecutionStatus.SUCCESS, TaskExecutionQueue.ExecutionStatus.FAILED],
-            "command": next_node.get("command"),
-            "params": next_node.get("params", {})
-        }, status=status.HTTP_200_OK)
+        res = ExecutionService.transition_state(
+            job=job,
+            outcome=outcome,
+            context_update=context_update,
+            error=error,
+            transition_id=transition_id
+        )
+        status_code = res.pop("status_code", status.HTTP_200_OK)
+        return Response(res, status=status_code)
 
     @action(detail=True, methods=["post"], url_path="heartbeat")
-    @transaction.atomic
     def heartbeat(self, request, pk=None):
         """
         Heartbeat ping from mobile runner to signify active job execution.
-        Prevents marking profile execution as zombie/disconnected.
         """
         job = self.get_object()
-        job = TaskExecutionQueue.objects.select_for_update().get(pk=job.pk)
-        now = timezone.now()
-
-        if job.status in [TaskExecutionQueue.ExecutionStatus.SUCCESS, TaskExecutionQueue.ExecutionStatus.FAILED]:
-            return Response({
-                "status": "TERMINAL",
-                "job_id": str(job.id),
-                "current_state": job.current_state_id,
-                "job_status": job.status
-            }, status=status.HTTP_200_OK)
-
-        if job.status == TaskExecutionQueue.ExecutionStatus.DISPATCHED:
-            job.status = TaskExecutionQueue.ExecutionStatus.RUNNING
-
-        if not isinstance(job.execution_context, dict):
-            job.execution_context = {}
-        job.execution_context["last_heartbeat"] = now.isoformat()
-        job.save()
-
-        return Response({
-            "status": "ALIVE",
-            "job_id": str(job.id),
-            "current_state": job.current_state_id,
-            "job_status": job.status
-        }, status=status.HTTP_200_OK)
+        device_id = request.data.get("device_id")
+        res = ExecutionService.heartbeat(job=job, device_id=device_id)
+        status_code = res.pop("status_code", status.HTTP_200_OK)
+        return Response(res, status=status_code)
 
     @action(detail=True, methods=["post"], url_path="abort")
-    @transaction.atomic
     def abort(self, request, pk=None):
         """
         Operator emergency kill-switch. Immediately cancels execution and marks as FAILED.
         """
         job = self.get_object()
-        job = TaskExecutionQueue.objects.select_for_update().get(pk=job.pk)
-        job.status = TaskExecutionQueue.ExecutionStatus.FAILED
-        job.error_message = "Task manually aborted by operator."
-        job.completed_at = timezone.now()
-
-        if not isinstance(job.logs, list):
-            job.logs = []
-        job.logs.append({
-            "type": "ABORT",
-            "message": "Task manually aborted by operator.",
-            "timestamp": timezone.now().isoformat()
-        })
-        job.save()
-
-        return Response({
-            "status": "ABORTED",
-            "job_id": str(job.id)
-        }, status=status.HTTP_200_OK)
+        reason = request.data.get("reason") or "Task manually aborted by operator."
+        res = ExecutionService.abort(job=job, reason=reason)
+        status_code = res.pop("status_code", status.HTTP_200_OK)
+        return Response(res, status=status_code)
 
     @action(detail=True, methods=["post"], url_path="decision")
     @transaction.atomic

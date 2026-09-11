@@ -166,6 +166,34 @@ class TaskExecutionQueue(models.Model):
     def __str__(self):
         return f"Queue {self.id} [{self.profile.name}] - {self.status}"
 
+    @property
+    def current_state(self) -> str:
+        return self.current_state_id
+
+    @current_state.setter
+    def current_state(self, value: str):
+        self.current_state_id = value
+
+    @property
+    def context(self) -> dict:
+        return self.execution_context
+
+    @context.setter
+    def context(self, value: dict):
+        self.execution_context = value
+
+    @property
+    def finished_at(self):
+        return self.completed_at
+
+    @finished_at.setter
+    def finished_at(self, value):
+        self.completed_at = value
+
+
+# Domain Model Alias
+Execution = TaskExecutionQueue
+
 
 class AIPromptConfig(models.Model):
     """Stores operator-controlled system prompts and model parameters."""

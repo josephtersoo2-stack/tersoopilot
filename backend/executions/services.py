@@ -1,9 +1,10 @@
+import uuid
 import datetime
 import logging
 from django.db import transaction
 from django.utils import timezone
 from devices.models import SavedProfile
-from .models import ExecutionLease, ExecutionLeaseStatus
+from .models import ExecutionLease, ExecutionLeaseStatus, ExecutionEvent, ExecutionEventType
 
 logger = logging.getLogger(__name__)
 
@@ -173,3 +174,345 @@ class LeaseService:
                 "remaining_seconds": max(0, int((active_lease.expires_at - now).total_seconds()))
             }
         return {"is_leased": False, "status": "AVAILABLE"}
+
+
+class ExecutionService:
+    """
+    Core execution orchestration service.
+    Decouples state-machine transitions, lifecycle heartbeats, and audit event emission
+    from REST views into a modular, reusable domain service.
+    """
+
+    @classmethod
+    def record_event(cls, execution_id, event_type: str, payload: dict = None) -> ExecutionEvent:
+        """Emits a structured time-series event for telemetry and timeline dashboards."""
+        return ExecutionEvent.objects.create(
+            execution_id=execution_id,
+            event_type=event_type,
+            payload=payload or {}
+        )
+
+    @classmethod
+    @transaction.atomic
+    def poll_next_job(cls, profile, device_id: str = None):
+        """
+        Polls the next PENDING execution for a given profile, atomically claiming it (CAS).
+        If device_id is provided, automatically records lease association.
+        """
+        from automation.models import TaskExecutionQueue
+        now = timezone.now()
+        pending = TaskExecutionQueue.objects.filter(
+            profile=profile,
+            status=TaskExecutionQueue.ExecutionStatus.PENDING
+        ).order_by("task__created_at")
+
+        for job in pending:
+            claimed = TaskExecutionQueue.objects.filter(
+                pk=job.pk,
+                status=TaskExecutionQueue.ExecutionStatus.PENDING
+            ).update(
+                status=TaskExecutionQueue.ExecutionStatus.DISPATCHED,
+                started_at=now
+            )
+            if claimed:
+                job.refresh_from_db()
+                if device_id:
+                    active_lease = ExecutionLease.objects.filter(
+                        profile=profile,
+                        device_id=device_id,
+                        status=ExecutionLeaseStatus.ACTIVE
+                    ).first()
+                    if active_lease:
+                        active_lease.execution_id = job.id
+                        active_lease.save(update_fields=["execution_id", "updated_at"])
+
+                cls.record_event(
+                    execution_id=job.id,
+                    event_type=ExecutionEventType.RUN_STARTED,
+                    payload={
+                        "profile_id": str(profile.id),
+                        "task_id": str(job.task_id),
+                        "device_id": device_id or "",
+                        "entry_state": job.entry_state_id
+                    }
+                )
+                return job
+        return None
+
+    @classmethod
+    @transaction.atomic
+    def transition_state(
+        cls,
+        job,
+        outcome: str = "SUCCESS",
+        context_update: dict = None,
+        error: str = None,
+        transition_id: str = None
+    ) -> dict:
+        """
+        Advances the state machine of an execution job.
+        Handles idempotency, terminal states, trust score increments, and event emission.
+        """
+        from automation.models import TaskExecutionQueue
+        from rest_framework.exceptions import ValidationError
+
+        if isinstance(job, (str, uuid.UUID)):
+            job = TaskExecutionQueue.objects.select_for_update().get(id=job)
+        else:
+            job = TaskExecutionQueue.objects.select_for_update().get(pk=job.pk)
+
+        context_update = context_update or {}
+
+        # Idempotency validation
+        if transition_id and any(entry.get("transition_id") == transition_id for entry in (job.logs or []) if isinstance(entry, dict)):
+            node = job.compiled_dag.get("states", {}).get(job.current_state_id, {})
+            return {
+                "status": "ADVANCED",
+                "current_state_id": job.current_state_id,
+                "is_terminal": job.status in ("SUCCESS", "FAILED"),
+                "command": node.get("command"),
+                "params": node.get("params", {}),
+                "status_code": 200
+            }
+
+        if job.status in ("SUCCESS", "FAILED"):
+            return {"error": "Execution is already terminal.", "status_code": 409}
+
+        states = job.compiled_dag.get("states", {})
+        current_node = states.get(job.current_state_id)
+
+        if not current_node:
+            job.status = TaskExecutionQueue.ExecutionStatus.FAILED
+            job.error_message = f"Node '{job.current_state_id}' not found in DAG."
+            job.save()
+            cls.record_event(
+                execution_id=job.id,
+                event_type=ExecutionEventType.FAILED,
+                payload={"error": job.error_message, "state": job.current_state_id}
+            )
+            return {"status": "ERROR", "message": job.error_message, "status_code": 400}
+
+        transitions = current_node.get("transitions", {})
+        if outcome not in transitions and outcome != "FAILURE":
+            raise ValidationError({"outcome": "Outcome is not defined for the current state."})
+
+        next_state_id = transitions.get(outcome, transitions.get("FAILURE", "exit"))
+        if next_state_id != "exit" and next_state_id not in states:
+            raise ValidationError("Transition references a missing state.")
+
+        # Update context
+        if not isinstance(job.execution_context, dict):
+            job.execution_context = {}
+        job.execution_context.update(context_update)
+
+        # Update logs
+        if not isinstance(job.logs, list):
+            job.logs = []
+        log_entry = {
+            "transition_id": transition_id,
+            "from_state": job.current_state_id,
+            "outcome": outcome,
+            "to_state": next_state_id,
+            "timestamp": timezone.now().isoformat()
+        }
+        job.logs.append(log_entry)
+
+        from_state = job.current_state_id
+        job.current_state_id = next_state_id
+
+        # Terminal check
+        terminal = next_state_id == "exit" or states.get(next_state_id, {}).get("command") == "TERMINATE"
+        now = timezone.now()
+
+        if terminal and outcome == "FAILURE":
+            job.status = TaskExecutionQueue.ExecutionStatus.FAILED
+            job.error_message = error or "Execution failed at terminal state."
+            job.completed_at = now
+            event_type = ExecutionEventType.FAILED
+        elif terminal:
+            job.status = TaskExecutionQueue.ExecutionStatus.SUCCESS
+            job.completed_at = now
+            event_type = ExecutionEventType.SUCCESS
+
+            # Trust score increments
+            complete_params = current_node.get("params", {})
+            inc = complete_params.get("increment_trust_score", 0)
+            if inc > 0 and hasattr(job.profile, "persona"):
+                persona = job.profile.persona
+                persona.trust_score = min(100, persona.trust_score + inc)
+                persona.save()
+        else:
+            job.status = TaskExecutionQueue.ExecutionStatus.RUNNING
+            event_type = ExecutionEventType.STATE_CHANGED
+
+        job.save()
+
+        # Emit time-series execution event
+        cls.record_event(
+            execution_id=job.id,
+            event_type=event_type,
+            payload={
+                "transition_id": transition_id,
+                "from_state": from_state,
+                "to_state": next_state_id,
+                "outcome": outcome,
+                "error": error or "",
+                "status": job.status
+            }
+        )
+
+        next_node = states.get(next_state_id, {})
+        return {
+            "status": "ADVANCED",
+            "current_state_id": job.current_state_id,
+            "is_terminal": job.status in [TaskExecutionQueue.ExecutionStatus.SUCCESS, TaskExecutionQueue.ExecutionStatus.FAILED],
+            "command": next_node.get("command"),
+            "params": next_node.get("params", {}),
+            "status_code": 200
+        }
+
+    @classmethod
+    @transaction.atomic
+    def heartbeat(cls, job, device_id: str = None) -> dict:
+        """
+        Processes client heartbeat. Updates last_heartbeat timestamp and transitions
+        DISPATCHED -> RUNNING. Also updates lease heartbeat if present.
+        """
+        from automation.models import TaskExecutionQueue
+        if isinstance(job, (str, uuid.UUID)):
+            job = TaskExecutionQueue.objects.select_for_update().get(id=job)
+        else:
+            job = TaskExecutionQueue.objects.select_for_update().get(pk=job.pk)
+
+        now = timezone.now()
+
+        if job.status in [TaskExecutionQueue.ExecutionStatus.SUCCESS, TaskExecutionQueue.ExecutionStatus.FAILED]:
+            return {
+                "status": "TERMINAL",
+                "job_id": str(job.id),
+                "current_state": job.current_state_id,
+                "job_status": job.status,
+                "status_code": 200
+            }
+
+        if job.status == TaskExecutionQueue.ExecutionStatus.DISPATCHED:
+            job.status = TaskExecutionQueue.ExecutionStatus.RUNNING
+
+        if not isinstance(job.execution_context, dict):
+            job.execution_context = {}
+        job.execution_context["last_heartbeat"] = now.isoformat()
+        job.save()
+
+        if device_id:
+            ExecutionLease.objects.filter(
+                profile=job.profile,
+                device_id=device_id,
+                status=ExecutionLeaseStatus.ACTIVE
+            ).update(heartbeat_at=now)
+
+        cls.record_event(
+            execution_id=job.id,
+            event_type=ExecutionEventType.HEARTBEAT,
+            payload={"current_state": job.current_state_id, "timestamp": now.isoformat()}
+        )
+
+        return {
+            "status": "ALIVE",
+            "job_id": str(job.id),
+            "current_state": job.current_state_id,
+            "job_status": job.status,
+            "status_code": 200
+        }
+
+    @classmethod
+    @transaction.atomic
+    def abort(cls, job, reason: str = "Task manually aborted by operator.") -> dict:
+        """
+        Emergency operator abort. Transitions status to FAILED, releases active leases.
+        """
+        from automation.models import TaskExecutionQueue
+        if isinstance(job, (str, uuid.UUID)):
+            job = TaskExecutionQueue.objects.select_for_update().get(id=job)
+        else:
+            job = TaskExecutionQueue.objects.select_for_update().get(pk=job.pk)
+
+        now = timezone.now()
+        job.status = TaskExecutionQueue.ExecutionStatus.FAILED
+        job.error_message = reason
+        job.completed_at = now
+
+        if not isinstance(job.logs, list):
+            job.logs = []
+        job.logs.append({
+            "type": "ABORT",
+            "message": reason,
+            "timestamp": now.isoformat()
+        })
+        job.save()
+
+        # Release associated leases
+        ExecutionLease.objects.filter(
+            profile=job.profile,
+            status=ExecutionLeaseStatus.ACTIVE
+        ).update(status=ExecutionLeaseStatus.RELEASED)
+
+        cls.record_event(
+            execution_id=job.id,
+            event_type=ExecutionEventType.ABORTED,
+            payload={"reason": reason, "timestamp": now.isoformat()}
+        )
+
+        return {
+            "status": "ABORTED",
+            "job_id": str(job.id),
+            "status_code": 200
+        }
+
+    @classmethod
+    @transaction.atomic
+    def reap_stalled_executions(cls, timeout_seconds: int = 60) -> int:
+        """
+        Reclaims orphaned executions that stopped sending heartbeats or whose device leases expired.
+        Transitions them to STALLED and emits STALLED events.
+        """
+        from automation.models import TaskExecutionQueue
+        threshold = timezone.now() - datetime.timedelta(seconds=timeout_seconds)
+        active_jobs = TaskExecutionQueue.objects.select_for_update().filter(
+            status__in=[
+                TaskExecutionQueue.ExecutionStatus.DISPATCHED,
+                TaskExecutionQueue.ExecutionStatus.RUNNING
+            ]
+        )
+
+        reaped_count = 0
+        now = timezone.now()
+        for job in active_jobs:
+            last_hb_str = (job.execution_context or {}).get("last_heartbeat")
+            is_stalled = False
+
+            if last_hb_str:
+                try:
+                    last_hb = datetime.datetime.fromisoformat(last_hb_str)
+                    if timezone.is_naive(last_hb):
+                        last_hb = timezone.make_aware(last_hb)
+                    if last_hb < threshold:
+                        is_stalled = True
+                except Exception:
+                    is_stalled = True
+            elif job.started_at and job.started_at < threshold:
+                is_stalled = True
+
+            if is_stalled:
+                job.status = TaskExecutionQueue.ExecutionStatus.STALLED
+                job.error_message = f"Execution timed out past {timeout_seconds}s heartbeat threshold."
+                job.completed_at = now
+                job.save(update_fields=["status", "error_message", "completed_at"])
+
+                cls.record_event(
+                    execution_id=job.id,
+                    event_type=ExecutionEventType.STALLED,
+                    payload={"reason": job.error_message, "reaped_at": now.isoformat()}
+                )
+                reaped_count += 1
+
+        return reaped_count

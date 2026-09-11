@@ -1,5 +1,45 @@
 from rest_framework import serializers
-from .models import ExecutionLease
+from .models import ExecutionLease, Execution, ExecutionEvent
+
+class ExecutionEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ExecutionEvent
+        fields = [
+            "id",
+            "execution_id",
+            "event_type",
+            "payload",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class ExecutionSerializer(serializers.ModelSerializer):
+    profile_name = serializers.CharField(source="profile.name", read_only=True)
+    task_name = serializers.CharField(source="task.name", read_only=True)
+
+    class Meta:
+        model = Execution
+        fields = [
+            "id",
+            "task",
+            "task_name",
+            "profile",
+            "profile_name",
+            "status",
+            "entry_state_id",
+            "current_state_id",
+            "compiled_dag",
+            "execution_context",
+            "logs",
+            "error_message",
+            "started_at",
+            "completed_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
 
 class ExecutionLeaseSerializer(serializers.ModelSerializer):
     profile_name = serializers.CharField(source="profile.name", read_only=True)

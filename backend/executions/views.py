@@ -101,3 +101,24 @@ class LeaseStatusView(APIView):
 
         result = LeaseService.get_profile_lease_status(request.user, profile_id)
         return Response(result, status=status.HTTP_200_OK)
+
+
+class ExecutionEventsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, execution_id):
+        from .models import ExecutionEvent
+        from .serializers import ExecutionEventSerializer
+        events = ExecutionEvent.objects.filter(execution_id=execution_id).order_by("created_at")
+        serializer = ExecutionEventSerializer(events, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class StalledReaperView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .services import ExecutionService
+        timeout = int(request.data.get("timeout_seconds", 60))
+        reaped_count = ExecutionService.reap_stalled_executions(timeout_seconds=timeout)
+        return Response({"reaped_count": reaped_count}, status=status.HTTP_200_OK)
