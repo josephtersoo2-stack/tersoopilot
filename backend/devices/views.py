@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 import requests
 from django.http import HttpResponse
@@ -62,9 +63,9 @@ class AvailableModelsView(APIView):
         try:
             result = fetch_available_models_from_provider(provider)
             return Response(result, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception:
             return Response(
-                {"error": f"Failed to fetch models from {provider}: {str(e)}"},
+                {"error": "Failed to fetch models. Please check your API key and try again."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -84,9 +85,9 @@ class GenerateDeviceProfileView(APIView):
             output_serializer = DeviceFingerprintResponseSerializer(data=device_specs)
             output_serializer.is_valid(raise_exception=True)
             return Response(output_serializer.data, status=status.HTTP_200_OK)
-        except Exception as e:
+        except Exception:
             return Response(
-                {"error": f"Failed to generate specs: {str(e)}"},
+                {"error": "Failed to generate device specifications. Please try again."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -137,8 +138,8 @@ class IPLookupView(APIView):
                     serializer = IPLookupResponseSerializer(data=payload)
                     serializer.is_valid(raise_exception=True)
                     return Response(serializer.data, status=status.HTTP_200_OK)
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception:
+            return Response({"error": "IP lookup service unavailable."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         return Response({"error": "Failed to query IP service"}, status=status.HTTP_502_BAD_GATEWAY)
 
@@ -148,6 +149,7 @@ class SavedProfileViewSet(viewsets.ModelViewSet):
     If authenticated, scopes to request.user or unassigned profiles.
     """
     serializer_class = SavedProfileSerializer
+    throttle_scope = "profiles"
 
     def get_queryset(self):
         return visible_profiles(self.request.user).order_by("-updated_at")
@@ -172,6 +174,7 @@ class ProfileCookieExportView(APIView):
     Exports cookies for a profile as a downloadable JSON file or raw JSON payload.
     GET /api/profiles/<profile_id>/cookies/export/?download=true
     """
+    throttle_scope = "cookies"
     def get(self, request, profile_id):
         profile = get_profile_for_cookies(profile_id, request.user)
         if not profile:
@@ -206,6 +209,7 @@ class ProfileCookieImportView(APIView):
     Imports raw Netscape/JSON cookies directly into a backend profile record.
     POST /api/profiles/<profile_id>/cookies/import/
     """
+    throttle_scope = "cookies"
     def post(self, request, profile_id):
         profile = get_profile_for_cookies(profile_id, request.user)
         if not profile:

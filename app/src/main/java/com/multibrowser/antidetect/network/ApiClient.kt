@@ -260,11 +260,59 @@ interface ApiService {
     suspend fun autoSaveSession(@Body req: AutoSaveSessionRequest): AutoSaveSessionResponse
 }
 
+class SafeRetryInterceptor(private val maxRetries: Int = 2) : okhttp3.Interceptor {
+    override fun intercept(chain: okhttp3.Interceptor.Chain): okhttp3.Response {
+        val request = chain.request()
+        val method = request.method.uppercase()
+        val path = request.url.encodedPath
+
+        // Only retry safe idempotent calls (GET, HEAD).
+        // NEVER retry POST automation execution or auth actions.
+        val isSafeToRetry = (method == "GET" || method == "HEAD") && !path.contains("/automation/")
+
+        var response: okhttp3.Response? = null
+        var lastException: java.io.IOException? = null
+        var attempts = 0
+
+        while (attempts <= (if (isSafeToRetry) maxRetries else 0)) {
+            attempts++
+            try {
+                response = chain.proceed(request)
+                if (response.isSuccessful || !isSafeToRetry || response.code in 400..499) {
+                    return response
+                }
+                response.close()
+            } catch (e: java.io.IOException) {
+                lastException = e
+                if (!isSafeToRetry || attempts > maxRetries) {
+                    throw e
+                }
+            }
+            try {
+                Thread.sleep(150L * attempts)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+        return response ?: throw (lastException ?: java.io.IOException("Request failed after $attempts attempts"))
+    }
+}
+
 object RetrofitInstance {
     @Volatile
     private var endpoint = com.multibrowser.antidetect.BuildConfig.API_BASE_URL
 
+    @Volatile
+    private var certificatePinner: okhttp3.CertificatePinner? = null
+
     val activeHost: String get() = endpoint
+
+    fun setCertificatePins(pinner: okhttp3.CertificatePinner) {
+        certificatePinner = pinner
+        _retrofit = null
+        _api = null
+    }
 
     @Synchronized
     fun setHost(host: String, clearCredentials: Boolean = true) {
@@ -297,15 +345,20 @@ object RetrofitInstance {
                     redactHeader("Authorization")
                 }
                 val clientEndpoint = endpoint
-                val client = OkHttpClient.Builder()
+                val clientBuilder = OkHttpClient.Builder()
                     .addInterceptor { chain ->
                         check(clientEndpoint == endpoint) { "Server changed; recreate the API client." }
                         val request = chain.request().newBuilder()
                         AuthManager.getAuthToken()?.takeIf { it.isNotBlank() }?.let {
                             request.header("Authorization", "Token $it")
                         }
-                        chain.proceed(request.build())
+                        val response = chain.proceed(request.build())
+                        if (response.code == 401 && AuthManager.isLoggedIn.value) {
+                            AuthManager.handleUnauthorized()
+                        }
+                        response
                     }
+                    .addInterceptor(SafeRetryInterceptor())
                     .addInterceptor(logging)
                     .followRedirects(false)
                     .followSslRedirects(false)
@@ -313,7 +366,10 @@ object RetrofitInstance {
                     .connectTimeout(10, TimeUnit.SECONDS)
                     .readTimeout(60, TimeUnit.SECONDS)
                     .writeTimeout(30, TimeUnit.SECONDS)
-                    .build()
+
+                certificatePinner?.let { clientBuilder.certificatePinner(it) }
+
+                val client = clientBuilder.build()
                 Retrofit.Builder().baseUrl(endpoint).client(client)
                     .addConverterFactory(GsonConverterFactory.create()).build().also { _retrofit = it }
             }
@@ -324,3 +380,4 @@ object RetrofitInstance {
             _api ?: retrofit.create(ApiService::class.java).also { _api = it }
         }
 }
+

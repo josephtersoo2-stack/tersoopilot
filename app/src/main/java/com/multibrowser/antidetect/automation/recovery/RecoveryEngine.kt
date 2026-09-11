@@ -2,6 +2,7 @@ package com.multibrowser.antidetect.automation.recovery
 
 import com.multibrowser.antidetect.automation.input.InputController
 import com.multibrowser.antidetect.automation.perception.*
+import com.multibrowser.antidetect.data.db.AppDatabase
 import kotlinx.coroutines.delay
 
 sealed class RecoveryResult {
@@ -13,18 +14,33 @@ sealed class RecoveryResult {
 
 class RecoveryEngine(
     private val inputController: InputController,
-    private val targetResolver: TargetResolver
+    private val targetResolver: TargetResolver,
+    private val db: AppDatabase? = null
 ) {
+    var maxAllowedRecoveryAttempts = 3
 
     /**
      * Handles missing or non-viewport elements by attempting bounded scroll-into-view sweeps.
-     * If element is rendered below or above viewport, flick-scrolls and re-perceives up to maxScrollAttempts.
+     * Persistently tracks attempts per (jobId, stepId) and aborts if max attempts are exceeded.
      */
     suspend fun recoverMissingTarget(
         spec: TargetSpec,
         maxScrollAttempts: Int = 4,
+        jobId: String? = null,
+        stepId: String? = null,
         getSnapshot: suspend () -> DomSnapshot?
     ): RecoveryResult {
+        // Enforce max recovery limit across process lifecycles
+        if (jobId != null && stepId != null && db != null) {
+            val existingAttempts = db.dao.getRecoveryAttemptCount(jobId, stepId)
+            if (existingAttempts >= maxAllowedRecoveryAttempts) {
+                return RecoveryResult.Abort(
+                    "Max recovery attempts ($maxAllowedRecoveryAttempts) exceeded for step '$stepId' in job '$jobId'"
+                )
+            }
+            db.dao.recordRecoveryAttempt(jobId, stepId, "Attempting scroll recovery for $spec")
+        }
+
         var currentSnapshot = getSnapshot()
             ?: return RecoveryResult.EscalateTier2("Unable to capture initial DOM snapshot", null)
 

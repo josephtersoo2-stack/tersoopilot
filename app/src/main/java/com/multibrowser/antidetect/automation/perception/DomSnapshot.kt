@@ -48,8 +48,11 @@ data class TargetSpec(
     val role: String? = null,
     val selector: String? = null,
     val textSnippet: String? = null,
-    val ariaLabel: String? = null
+    val ariaLabel: String? = null,
+    val coordinateX: Float? = null,
+    val coordinateY: Float? = null
 )
+
 
 data class ResolvedTarget(
     val element: ElementSnapshot,

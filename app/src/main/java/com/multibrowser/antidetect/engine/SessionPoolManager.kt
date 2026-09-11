@@ -12,13 +12,80 @@ import org.mozilla.geckoview.WebExtension
 import java.io.File
 import java.io.FileWriter
 
+data class ExecutionLease(
+    val profileId: String,
+    val deviceId: String,
+    val leaseToken: String = java.util.UUID.randomUUID().toString(),
+    val acquiredAt: Long = System.currentTimeMillis(),
+    val expiresAt: Long = System.currentTimeMillis() + 30_000L
+)
+
 class SessionPoolManager(private val context: Context) {
 
     private val runtimePool = mutableMapOf<String, GeckoRuntime>()
     val activeSessions = mutableMapOf<String, GeckoSession>()
+    private val activeLeases = mutableMapOf<String, ExecutionLease>()
     var maxAllowedConcurrency = 5
     var currentActiveProfileId: String? = null
         private set
+
+    /**
+     * Attempts to acquire a mutual-exclusion execution lease for this profile.
+     * Prevents multiple devices or runner instances from executing the same profile concurrently.
+     */
+    fun acquireLease(profileId: String, deviceId: String, durationMs: Long = 30_000L): ExecutionLease? {
+        val existing = activeLeases[profileId]
+        val now = System.currentTimeMillis()
+        if (existing != null && existing.expiresAt > now && existing.deviceId != deviceId) {
+            return null // Actively leased by another device
+        }
+        val lease = ExecutionLease(
+            profileId = profileId,
+            deviceId = deviceId,
+            acquiredAt = now,
+            expiresAt = now + durationMs
+        )
+        activeLeases[profileId] = lease
+        return lease
+    }
+
+    /**
+     * Heartbeat to renew an existing execution lease.
+     */
+    fun renewLease(profileId: String, leaseToken: String, durationMs: Long = 30_000L): Boolean {
+        val existing = activeLeases[profileId] ?: return false
+        if (existing.leaseToken != leaseToken) return false
+        val now = System.currentTimeMillis()
+        activeLeases[profileId] = existing.copy(expiresAt = now + durationMs)
+        return true
+    }
+
+    /**
+     * Releases an execution lease when automation completes or aborts.
+     */
+    fun releaseLease(profileId: String, leaseToken: String): Boolean {
+        val existing = activeLeases[profileId] ?: return false
+        if (existing.leaseToken != leaseToken) return false
+        activeLeases.remove(profileId)
+        return true
+    }
+
+    /**
+     * Returns true if a lease is currently valid for this profile and optional deviceId.
+     */
+    fun isLeaseValid(profileId: String, deviceId: String? = null): Boolean {
+        val existing = activeLeases[profileId] ?: return false
+        val now = System.currentTimeMillis()
+        if (existing.expiresAt <= now) {
+            activeLeases.remove(profileId)
+            return false
+        }
+        if (deviceId != null && existing.deviceId != deviceId) {
+            return false
+        }
+        return true
+    }
+
 
     // Observable UI state: profileId -> isMuted (true by default)
     val sessionMuteStates = androidx.compose.runtime.mutableStateMapOf<String, Boolean>()

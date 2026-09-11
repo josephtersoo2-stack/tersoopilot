@@ -59,10 +59,13 @@ import com.multibrowser.antidetect.ui.theme.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.multibrowser.antidetect.engine.BrowserCoordinator
+import com.multibrowser.antidetect.automation.AutomationCoordinator
 import com.multibrowser.antidetect.automation.GhostPilotRunner
 import com.multibrowser.antidetect.automation.NativeGestureInjector
 import com.multibrowser.antidetect.automation.input.InputController
 import com.multibrowser.antidetect.automation.input.NativeInputAdapter
+import com.multibrowser.antidetect.ui.MainViewModel
 import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoView
 import java.net.URLEncoder
@@ -71,14 +74,14 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var db: AppDatabase
     private lateinit var engine: GeckoProfileEngine
-
-    // Callback to persist tabs across lifecycle events
-    private var onPersistAllTabs: (() -> Unit)? = null
+    private lateinit var browserCoordinator: BrowserCoordinator
+    private val automationCoordinator = AutomationCoordinator()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         db = AppDatabase.getDatabase(this)
         engine = GeckoProfileEngine(this)
+        browserCoordinator = BrowserCoordinator(this, db, engine, lifecycleScope)
         AuthManager.init(this)
         ThemeManager.init(this)
 
@@ -91,58 +94,41 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
-        onPersistAllTabs?.invoke()
+        browserCoordinator.persistAllRunningTabs()
     }
 
     override fun onStop() {
         super.onStop()
-        onPersistAllTabs?.invoke()
+        browserCoordinator.persistAllRunningTabs()
     }
 
     override fun onDestroy() {
-        onPersistAllTabs?.invoke()
-        engine.stopAll()
+        automationCoordinator.stopAll()
+        browserCoordinator.stopAll()
         super.onDestroy()
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     fun MainScreen() {
-        val profiles by db.profileDao().getAllProfiles().collectAsState(initial = emptyList())
+        val viewModel = androidx.lifecycle.ViewModelProvider(this@MainActivity)[MainViewModel::class.java]
+        val profiles by viewModel.profiles.collectAsState(initial = emptyList())
+        val maxAllowedConcurrency by viewModel.maxAllowedConcurrency.collectAsState()
 
-        // Multiple concurrent running profiles: profileId -> ActiveProfileState
-        var runningProfiles by remember { mutableStateOf<Map<String, ActiveProfileState>>(emptyMap()) }
-        var foregroundProfileId by remember { mutableStateOf<String?>(null) }
-
-        // Dynamic server-controlled max active profiles concurrency (1 to 10)
-        var maxAllowedConcurrency by remember { mutableIntStateOf(5) }
-
-        // Fetch global settings from backend control plane
-        LaunchedEffect(Unit) {
-            try {
-                val globalSettings = withContext(Dispatchers.IO) {
-                    RetrofitInstance.api.getGlobalSettings()
-                }
-                maxAllowedConcurrency = globalSettings.maxActiveProfiles
-            } catch (e: Exception) {
-                maxAllowedConcurrency = 5 // Fallback default
-            }
-        }
-
-        // Current active foreground profile state and tab
-        val currentActiveProfileState = foregroundProfileId?.let { runningProfiles[it] }
+        val runningProfiles = browserCoordinator.runningProfiles
+        val foregroundProfileId = browserCoordinator.foregroundProfileId
+        val currentActiveProfileState = browserCoordinator.currentActiveProfileState
         val activeProfile = currentActiveProfileState?.profile
         val currentTabs = currentActiveProfileState?.tabs ?: emptyList()
         val currentTab = currentTabs.firstOrNull { it.id == currentActiveProfileState?.activeTabId }
             ?: currentTabs.firstOrNull()
-        val currentSession = currentTab?.session
+        val currentSession = browserCoordinator.currentSession
 
-        // Real-time navigation and progress states
-        var isPageLoading by remember { mutableStateOf(false) }
-        var pageProgress by remember { mutableFloatStateOf(0f) }
-        var canGoBackState by remember { mutableStateOf(false) }
-        var canGoForwardState by remember { mutableStateOf(false) }
-        var urlInputText by remember { mutableStateOf("https://www.google.com") }
+        val isPageLoading = browserCoordinator.isPageLoading
+        val pageProgress = browserCoordinator.pageProgress
+        val canGoBackState = browserCoordinator.canGoBackState
+        val canGoForwardState = browserCoordinator.canGoForwardState
+        var urlInputText by remember(browserCoordinator.urlInputText) { mutableStateOf(browserCoordinator.urlInputText) }
 
         // Sheet and dialog states
         var showCreateSheet by remember { mutableStateOf(false) }
@@ -160,182 +146,95 @@ class MainActivity : ComponentActivity() {
         var showBookmarksSheet by remember { mutableStateOf(false) }
         var showHistorySheet by remember { mutableStateOf(false) }
         var cookieActionProfile by remember { mutableStateOf<Pair<String, String>?>(null) }
-        val profileHistories = remember { mutableStateMapOf<String, String>() }
+        val profileHistories = browserCoordinator.profileHistories
 
-        // Single-Active Audio Profile Orchestration (Mutual Audio Exclusion)
-        val sessionMuteStates = remember { mutableStateMapOf<String, Boolean>() }
-        var currentAudioOwnerId by remember { mutableStateOf<String?>(null) }
+        val sessionMuteStates = browserCoordinator.sessionMuteStates
+        val currentAudioOwnerId = browserCoordinator.currentAudioOwnerId
 
-        // GhostPilot Execution Engines (Physical native automation runners)
-        val ghostPilotRunners = remember { mutableStateMapOf<String, GhostPilotRunner>() }
         var activeGeckoView by remember { mutableStateOf<GeckoView?>(null) }
 
         // GhostPilot Runner for active foreground profile
         val currentRunner = remember(foregroundProfileId, currentSession, activeGeckoView) {
             if (foregroundProfileId != null && currentSession != null && activeGeckoView != null) {
-                val injector = NativeGestureInjector(activeGeckoView!!)
-                val inputController = NativeInputAdapter(activeGeckoView!!, injector)
-                val existing = ghostPilotRunners[foregroundProfileId]
                 val prof = runningProfiles[foregroundProfileId]?.profile
                 val pName = prof?.name ?: ""
                 val pCloudId = prof?.cloudSyncId ?: ""
-                if (existing != null) {
-                    existing.updateSessionAndView(currentSession, activeGeckoView!!, inputController)
-                    existing.profileName = pName
-                    if (pCloudId.isNotBlank()) existing.cloudSyncId = pCloudId
-                    existing.getCurrentUrl = {
+                automationCoordinator.getOrCreateRunner(
+                    context = this@MainActivity,
+                    profileId = foregroundProfileId,
+                    profileName = pName,
+                    cloudSyncId = pCloudId,
+                    session = currentSession,
+                    targetView = activeGeckoView!!,
+                    getCurrentUrl = {
                         runningProfiles[foregroundProfileId]?.let { st ->
                             st.tabs.firstOrNull { it.id == st.activeTabId }?.url ?: ""
                         } ?: ""
-                    }
-                    existing.getCurrentTitle = {
+                    },
+                    getCurrentTitle = {
                         runningProfiles[foregroundProfileId]?.let { st ->
                             st.tabs.firstOrNull { it.id == st.activeTabId }?.title ?: ""
                         } ?: ""
                     }
-                    existing
-                } else {
-                    val created = GhostPilotRunner(
-                        context = this@MainActivity,
-                        profileId = foregroundProfileId!!,
-                        session = currentSession,
-                        targetView = activeGeckoView!!,
-                        inputController = inputController,
-                        profileName = pName,
-                        cloudSyncId = pCloudId
-                    )
-                    created.getCurrentUrl = {
-                        runningProfiles[foregroundProfileId]?.let { st ->
-                            st.tabs.firstOrNull { it.id == st.activeTabId }?.url ?: ""
-                        } ?: ""
-                    }
-                    created.getCurrentTitle = {
-                        runningProfiles[foregroundProfileId]?.let { st ->
-                            st.tabs.firstOrNull { it.id == st.activeTabId }?.title ?: ""
-                        } ?: ""
-                    }
-                    ghostPilotRunners[foregroundProfileId!!] = created
-                    created
-                }
+                )
             } else {
                 null
             }
         }
 
-        fun sendMuteCommandToSession(session: GeckoSession, muted: Boolean) {
-            try {
-                val jsCommand = """
-                    window.postMessage({ type: 'SET_MUTE_STATE', muted: $muted }, '*');
-                    document.querySelectorAll('video, audio').forEach(function(el) {
-                        try {
-                            el.muted = $muted;
-                            el.volume = ${if (muted) "0.0" else "1.0"};
-                        } catch(e) {}
-                    });
-                    try {
-                        var p = document.getElementById('movie_player');
-                        if (p) {
-                            if ($muted) {
-                                if (p.mute) p.mute();
-                            } else {
-                                if (p.unMute) p.unMute();
-                                if (p.setVolume) p.setVolume(100);
-                            }
-                        }
-                    } catch(e) {}
-                """.trimIndent().replace("\n", " ")
-
-                session.loadUri("javascript:(function(){ $jsCommand })();")
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        fun sendMuteCommandToProfile(profileId: String, muted: Boolean) {
-            val state = runningProfiles[profileId] ?: return
-            state.tabs.forEach { tab ->
-                sendMuteCommandToSession(tab.session, muted)
-            }
-        }
-
         fun toggleProfileAudio(profileId: String) {
-            val currentlyMuted = sessionMuteStates[profileId] ?: true
-            if (currentlyMuted) {
-                // User wants to UNMUTE this profile
-                // 1. Mute previous audio owner if different (Mutual Audio Exclusion)
-                currentAudioOwnerId?.let { prevId ->
-                    if (prevId != profileId && runningProfiles.containsKey(prevId)) {
-                        sendMuteCommandToProfile(prevId, muted = true)
-                        sessionMuteStates[prevId] = true
-                    }
-                }
-                // 2. Unmute the target profile
-                sendMuteCommandToProfile(profileId, muted = false)
-                sessionMuteStates[profileId] = false
-                currentAudioOwnerId = profileId
-            } else {
-                // User wants to MUTE this profile
-                sendMuteCommandToProfile(profileId, muted = true)
-                sessionMuteStates[profileId] = true
-                if (currentAudioOwnerId == profileId) {
-                    currentAudioOwnerId = null
-                }
-            }
+            browserCoordinator.toggleProfileAudio(profileId)
         }
 
-        val isLoggedIn by AuthManager.isLoggedIn.collectAsState()
-        val currentUsername by AuthManager.currentUsername.collectAsState()
+        fun startProfile(profile: ProfileEntity, openForeground: Boolean = true) {
+            browserCoordinator.startProfile(profile, openForeground, maxAllowedConcurrency)
+        }
 
-        fun persistTabsForProfile(profileId: String) {
-            val state = runningProfiles[profileId] ?: return
-            lifecycleScope.launch {
-                val entities = state.tabs.mapIndexed { index, tab ->
-                    SavedTabEntity(
-                        id = tab.id,
-                        profileId = profileId,
-                        title = tab.title,
-                        url = tab.url,
-                        tabOrder = index,
-                        isCurrentTab = (tab.id == state.activeTabId)
-                    )
-                }
-                db.profileDao().saveTabsForProfile(profileId, entities)
+        fun selectRunningProfile(profileId: String) {
+            browserCoordinator.selectRunningProfile(profileId)
+        }
+
+        fun stopProfile(profileId: String) {
+            automationCoordinator.stopAutomation(profileId)
+            browserCoordinator.stopProfile(profileId)
+        }
+
+        fun createNewTab(url: String = "https://www.google.com") {
+            browserCoordinator.openNewTab(url)
+        }
+
+        fun switchTab(tab: BrowserTab) {
+            browserCoordinator.switchTab(tab)
+            showTabsSheet = false
+        }
+
+        fun closeTab(tab: BrowserTab) {
+            browserCoordinator.closeTab(tab)
+            if (currentTabs.size <= 1) {
+                showTabsSheet = false
             }
         }
 
         fun persistAllRunningTabs() {
-            runningProfiles.keys.forEach { profileId ->
-                persistTabsForProfile(profileId)
-            }
+            browserCoordinator.persistAllRunningTabs()
         }
+
+        val isLoggedIn by AuthManager.isLoggedIn.collectAsState()
+        val currentUsername by AuthManager.currentUsername.collectAsState()
 
         // Back button navigation when browser is active
         BackHandler(enabled = foregroundProfileId != null) {
             if (canGoBackState && currentSession != null) {
                 currentSession.goBack()
             } else {
-                persistAllRunningTabs()
-                foregroundProfileId = null
+                browserCoordinator.persistAllRunningTabs()
+                browserCoordinator.foregroundProfileId = null
             }
         }
 
         // Back button confirmation when on main overview screen
         BackHandler(enabled = foregroundProfileId == null) {
             showExitAppDialog = true
-        }
-
-        // Helper to serialize tabs for cloud/sqlite session syncing
-        fun serializeTabs(tabs: List<BrowserTab>): String {
-            val arr = org.json.JSONArray()
-            tabs.forEach { t ->
-                val obj = org.json.JSONObject().apply {
-                    put("id", t.id)
-                    put("title", t.title)
-                    put("url", t.url)
-                }
-                arr.put(obj)
-            }
-            return arr.toString()
         }
 
         // Search & Filter state
@@ -353,371 +252,6 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Register lifecycle callback
-        DisposableEffect(runningProfiles) {
-            onPersistAllTabs = { persistAllRunningTabs() }
-            onDispose { onPersistAllTabs = null }
-        }
-
-        // Smart address bar URL / Google search query resolver
-        fun resolveNavigationTarget(input: String): String {
-            val trimmed = input.trim()
-            if (trimmed.isEmpty()) return "https://www.google.com"
-
-            val isUrl = trimmed.startsWith("http://", ignoreCase = true) ||
-                trimmed.startsWith("https://", ignoreCase = true) ||
-                trimmed.startsWith("about:", ignoreCase = true) ||
-                (!trimmed.contains(" ") && (
-                    trimmed.contains(".") ||
-                    trimmed.startsWith("localhost") ||
-                    trimmed.matches(Regex("^[0-9]{1,3}(\\.[0-9]{1,3}){3}(:[0-9]+)?.*$"))
-                ))
-
-            return if (isUrl) {
-                if (trimmed.startsWith("http://", ignoreCase = true) ||
-                    trimmed.startsWith("https://", ignoreCase = true) ||
-                    trimmed.startsWith("about:", ignoreCase = true)
-                ) {
-                    trimmed
-                } else {
-                    "https://$trimmed"
-                }
-            } else {
-                // Direct Google Search
-                val encoded = URLEncoder.encode(trimmed, "UTF-8")
-                "https://www.google.com/search?q=$encoded"
-            }
-        }
-
-        // Handle system back gesture
-        BackHandler(enabled = foregroundProfileId != null) {
-            if (canGoBackState && currentSession != null) {
-                currentSession.goBack()
-            } else {
-                // Return to profiles list overview while keeping all sessions and tabs alive in background
-                persistAllRunningTabs()
-                foregroundProfileId = null
-            }
-        }
-
-        fun attachDelegatesToSession(profileId: String, tab: BrowserTab) {
-            tab.session.navigationDelegate = object : GeckoSession.NavigationDelegate {
-                override fun onCanGoBack(s: GeckoSession, back: Boolean) {
-                    tab.canGoBack = back
-                    if (profileId == foregroundProfileId && tab.id == runningProfiles[profileId]?.activeTabId) {
-                        canGoBackState = back
-                    }
-                }
-
-                override fun onCanGoForward(s: GeckoSession, forward: Boolean) {
-                    tab.canGoForward = forward
-                    if (profileId == foregroundProfileId && tab.id == runningProfiles[profileId]?.activeTabId) {
-                        canGoForwardState = forward
-                    }
-                }
-
-                override fun onLocationChange(
-                    s: GeckoSession,
-                    url: String?,
-                    perms: List<GeckoSession.PermissionDelegate.ContentPermission>,
-                    hasUserGesture: Boolean
-                ) {
-                    url?.let { newUrl ->
-                        tab.url = newUrl
-                        if (profileId == foregroundProfileId && tab.id == runningProfiles[profileId]?.activeTabId) {
-                            urlInputText = newUrl
-                        }
-                        persistTabsForProfile(profileId)
-
-                        // Record into history JSON array
-                        if (newUrl.startsWith("http")) {
-                            val currentHist = profileHistories[profileId] ?: runningProfiles[profileId]?.profile?.historyJson ?: "[]"
-                            try {
-                                val arr = org.json.JSONArray(if (currentHist.isBlank()) "[]" else currentHist)
-                                val newEntry = org.json.JSONObject().apply {
-                                    put("title", tab.title.ifBlank { newUrl })
-                                    put("url", newUrl)
-                                    put("timestamp", System.currentTimeMillis())
-                                }
-                                arr.put(newEntry)
-                                val trimmed = if (arr.length() > 200) {
-                                    val sub = org.json.JSONArray()
-                                    for (i in (arr.length() - 200) until arr.length()) {
-                                        sub.put(arr.get(i))
-                                    }
-                                    sub
-                                } else arr
-                                profileHistories[profileId] = trimmed.toString()
-                            } catch (_: Exception) {}
-                        }
-                    }
-                }
-            }
-
-            tab.session.progressDelegate = object : GeckoSession.ProgressDelegate {
-                override fun onPageStart(s: GeckoSession, url: String) {
-                    tab.isLoading = true
-                    tab.progress = 0.15f
-                    if (profileId == foregroundProfileId && tab.id == runningProfiles[profileId]?.activeTabId) {
-                        isPageLoading = true
-                        pageProgress = 0.15f
-                    }
-                }
-
-                override fun onPageStop(s: GeckoSession, success: Boolean) {
-                    tab.isLoading = false
-                    tab.progress = 1.0f
-                    if (profileId == foregroundProfileId && tab.id == runningProfiles[profileId]?.activeTabId) {
-                        isPageLoading = false
-                        pageProgress = 1.0f
-                    }
-                    persistTabsForProfile(profileId)
-
-                    // Enforce session mute state upon page load completion
-                    val isMuted = sessionMuteStates[profileId] ?: true
-                    sendMuteCommandToSession(s, isMuted)
-
-                    // Request cookies from WebExtension native port and auto-save session
-                    engine.requestCookies { cookiesJson, cookieCount ->
-                        runningProfiles[profileId]?.let { st ->
-                            val tabsJson = serializeTabs(st.tabs)
-                            val histJson = profileHistories[profileId] ?: st.profile.historyJson
-                            SyncManager.scheduleAutoSave(
-                                this@MainActivity,
-                                profileId,
-                                st.profile.name,
-                                cookiesJson,
-                                histJson,
-                                tabsJson,
-                                cookieCount
-                            )
-                        }
-                    }
-                }
-
-                override fun onProgressChange(s: GeckoSession, progress: Int) {
-                    val p = progress / 100f
-                    tab.progress = p
-                    if (profileId == foregroundProfileId && tab.id == runningProfiles[profileId]?.activeTabId) {
-                        pageProgress = p
-                    }
-                }
-            }
-
-            tab.session.contentDelegate = object : GeckoSession.ContentDelegate {
-                override fun onTitleChange(s: GeckoSession, title: String?) {
-                    title?.let {
-                        tab.title = it
-                        persistTabsForProfile(profileId)
-                    }
-                }
-            }
-        }
-
-        fun selectRunningProfile(profileId: String) {
-            foregroundProfileId = profileId
-            val state = runningProfiles[profileId] ?: return
-            val tab = state.tabs.firstOrNull { it.id == state.activeTabId } ?: state.tabs.firstOrNull()
-            if (tab != null) {
-                urlInputText = tab.url
-                canGoBackState = tab.canGoBack
-                canGoForwardState = tab.canGoForward
-                isPageLoading = tab.isLoading
-                pageProgress = tab.progress
-            }
-        }
-
-        fun startProfile(profile: ProfileEntity, openForeground: Boolean = true) {
-            if (profile.id in runningProfiles) {
-                if (openForeground) {
-                    selectRunningProfile(profile.id)
-                }
-                return
-            }
-
-            // Restore cookies into engine if available
-            if (profile.cookiesJson.isNotBlank() && profile.cookiesJson != "[]") {
-                engine.restoreCookies(profile.cookiesJson)
-            }
-            profileHistories[profile.id] = profile.historyJson
-
-            // Check dynamic concurrency cap
-            if (runningProfiles.size >= maxAllowedConcurrency) {
-                Toast.makeText(
-                    this@MainActivity,
-                    "Limit of $maxAllowedConcurrency active profiles reached! Adjust in Admin Dashboard.",
-                    Toast.LENGTH_SHORT
-                ).show()
-                return
-            }
-
-            lifecycleScope.launch {
-                // Restore tabs from SQLite if previously saved
-                val savedTabs = db.profileDao().getTabsForProfile(profile.id)
-                val restoredTabs = mutableListOf<BrowserTab>()
-                var initialActiveTabId = ""
-
-                if (savedTabs.isNotEmpty()) {
-                    savedTabs.forEach { savedTab ->
-                        val session = engine.createTabSession(profile)
-                        val browserTab = BrowserTab(
-                            id = savedTab.id,
-                            session = session,
-                            title = savedTab.title.ifBlank { "Tab" },
-                            url = savedTab.url.ifBlank { "https://www.google.com" }
-                        )
-                        attachDelegatesToSession(profile.id, browserTab)
-                        session.loadUri(browserTab.url)
-                        restoredTabs.add(browserTab)
-                        if (savedTab.isCurrentTab || initialActiveTabId.isEmpty()) {
-                            initialActiveTabId = browserTab.id
-                        }
-                    }
-                } else {
-                    // Fresh profile start -> Default to Google
-                    val defaultUrl = "https://www.google.com"
-                    val session = engine.createTabSession(profile)
-                    val initialTab = BrowserTab(
-                        session = session,
-                        title = "Google",
-                        url = defaultUrl
-                    )
-                    attachDelegatesToSession(profile.id, initialTab)
-                    session.loadUri(defaultUrl)
-                    restoredTabs.add(initialTab)
-                    initialActiveTabId = initialTab.id
-                }
-
-                sessionMuteStates[profile.id] = true // Guaranteed muted on initial launch
-
-                val newState = ActiveProfileState(
-                    profile = profile,
-                    tabs = restoredTabs,
-                    activeTabId = initialActiveTabId
-                )
-
-                runningProfiles = runningProfiles + (profile.id to newState)
-
-                if (openForeground) {
-                    foregroundProfileId = profile.id
-                    val activeTab = restoredTabs.firstOrNull { it.id == initialActiveTabId } ?: restoredTabs.first()
-                    urlInputText = activeTab.url
-                    canGoBackState = activeTab.canGoBack
-                    canGoForwardState = activeTab.canGoForward
-                    isPageLoading = activeTab.isLoading
-                    pageProgress = activeTab.progress
-                }
-
-                // Persist tabs for this profile
-                persistTabsForProfile(profile.id)
-
-                // Resolve live network status via backend
-                db.profileDao().updateLastUsed(profile.id, System.currentTimeMillis())
-                try {
-                    val info = RetrofitInstance.api.lookupIp()
-                    runningProfiles = runningProfiles.toMutableMap().apply {
-                        get(profile.id)?.let { st ->
-                            put(profile.id, st.copy(liveIp = info.ip, location = "${info.city}, ${info.country}"))
-                        }
-                    }
-                } catch (e: Exception) {
-                    runningProfiles = runningProfiles.toMutableMap().apply {
-                        get(profile.id)?.let { st ->
-                            put(profile.id, st.copy(liveIp = "Direct IP", location = "Local Network"))
-                        }
-                    }
-                }
-            }
-        }
-
-        fun stopProfile(profileId: String) {
-            persistTabsForProfile(profileId)
-            ghostPilotRunners[profileId]?.stop()
-            ghostPilotRunners.remove(profileId)
-            if (currentAudioOwnerId == profileId) {
-                currentAudioOwnerId = null
-            }
-            sessionMuteStates.remove(profileId)
-            val state = runningProfiles[profileId]
-            state?.tabs?.forEach { tab ->
-                engine.closeTabSession(profileId, tab.session)
-            }
-            engine.closeProfile(profileId)
-            val updated = runningProfiles - profileId
-            runningProfiles = updated
-
-            if (foregroundProfileId == profileId) {
-                val nextId = updated.keys.lastOrNull()
-                if (nextId != null) {
-                    selectRunningProfile(nextId)
-                } else {
-                    foregroundProfileId = null
-                }
-            }
-        }
-
-        fun createNewTab(targetUrl: String = "https://www.google.com") {
-            val state = currentActiveProfileState ?: return
-            val session = engine.createTabSession(state.profile)
-            val isMuted = sessionMuteStates[state.profile.id] ?: true
-            sendMuteCommandToSession(session, isMuted)
-            val newTab = BrowserTab(
-                session = session,
-                title = "New Tab",
-                url = targetUrl
-            )
-            attachDelegatesToSession(state.profile.id, newTab)
-
-            val updatedTabs = state.tabs + newTab
-            val updatedState = state.copy(
-                tabs = updatedTabs,
-                activeTabId = newTab.id
-            )
-            runningProfiles = runningProfiles + (state.profile.id to updatedState)
-            urlInputText = targetUrl
-            canGoBackState = false
-            canGoForwardState = false
-            isPageLoading = true
-            pageProgress = 0.15f
-            showTabsSheet = false
-            session.loadUri(targetUrl)
-            persistTabsForProfile(state.profile.id)
-        }
-
-        fun switchTab(tab: BrowserTab) {
-            val state = currentActiveProfileState ?: return
-            val updatedState = state.copy(activeTabId = tab.id)
-            runningProfiles = runningProfiles + (state.profile.id to updatedState)
-            urlInputText = tab.url
-            canGoBackState = tab.canGoBack
-            canGoForwardState = tab.canGoForward
-            isPageLoading = tab.isLoading
-            pageProgress = tab.progress
-            showTabsSheet = false
-            persistTabsForProfile(state.profile.id)
-        }
-
-        fun closeTab(tab: BrowserTab) {
-            val state = currentActiveProfileState ?: return
-            engine.closeTabSession(state.profile.id, tab.session)
-            val remaining = state.tabs.filter { it.id != tab.id }
-            if (remaining.isEmpty()) {
-                stopProfile(state.profile.id)
-                showTabsSheet = false
-            } else {
-                val newActiveTabId = if (state.activeTabId == tab.id) remaining.last().id else state.activeTabId
-                val updatedState = state.copy(
-                    tabs = remaining,
-                    activeTabId = newActiveTabId
-                )
-                runningProfiles = runningProfiles + (state.profile.id to updatedState)
-                if (state.activeTabId == tab.id) {
-                    val active = remaining.firstOrNull { it.id == newActiveTabId } ?: remaining.last()
-                    switchTab(active)
-                }
-                persistTabsForProfile(state.profile.id)
-            }
-        }
 
         Scaffold(
             topBar = {
@@ -846,8 +380,8 @@ class MainActivity : ComponentActivity() {
                                 ) {
                                     IconButton(
                                         onClick = {
-                                            persistAllRunningTabs()
-                                            foregroundProfileId = null
+                                            browserCoordinator.persistAllRunningTabs()
+                                            browserCoordinator.foregroundProfileId = null
                                         },
                                         modifier = Modifier.size(38.dp)
                                     ) {
@@ -876,7 +410,7 @@ class MainActivity : ComponentActivity() {
                                         textStyle = MaterialTheme.typography.bodySmall.copy(color = OctoTextPrimary),
                                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                                         keyboardActions = KeyboardActions(onGo = {
-                                            val target = resolveNavigationTarget(urlInputText)
+                                            val target = browserCoordinator.resolveNavigationTarget(urlInputText)
                                             urlInputText = target
                                             currentSession.loadUri(target)
                                         }),
@@ -933,7 +467,7 @@ class MainActivity : ComponentActivity() {
                                             if (isPageLoading) {
                                                 currentSession.stop()
                                             } else {
-                                                val target = resolveNavigationTarget(urlInputText)
+                                                val target = browserCoordinator.resolveNavigationTarget(urlInputText)
                                                 urlInputText = target
                                                 currentSession.loadUri(target)
                                             }
@@ -1378,7 +912,7 @@ class MainActivity : ComponentActivity() {
                                 SyncManager.pushProfileToCloud(this@MainActivity, savedProfile)
                             }
                             if (savedProfile.id in runningProfiles) {
-                                runningProfiles = runningProfiles.toMutableMap().apply {
+                                browserCoordinator.runningProfiles = browserCoordinator.runningProfiles.toMutableMap().apply {
                                     get(savedProfile.id)?.let { st ->
                                         put(savedProfile.id, st.copy(profile = savedProfile))
                                     }
@@ -1448,7 +982,7 @@ class MainActivity : ComponentActivity() {
                                     id = profId,
                                     cookiesJson = activeProfile?.cookiesJson ?: "[]",
                                     historyJson = "[]",
-                                    tabsJson = serializeTabs(currentTabs),
+                                    tabsJson = browserCoordinator.serializeTabs(currentTabs),
                                     cookieCount = activeProfile?.cookieCount ?: 0
                                 )
                             }

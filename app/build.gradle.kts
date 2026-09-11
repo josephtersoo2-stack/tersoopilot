@@ -98,4 +98,5 @@ dependencies {
 
     // Unit Testing
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303")
 }

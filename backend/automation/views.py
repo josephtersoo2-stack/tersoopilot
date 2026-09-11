@@ -533,8 +533,8 @@ class ProfileNicheManagementViewSet(viewsets.ViewSet):
             return Response(ProfilePersonaSerializer(persona).data, status=status.HTTP_200_OK)
         except SavedProfile.DoesNotExist:
             return Response({"error": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
-        except Exception as e:
-            return Response({"error": f"Failed to update persona: {str(e)}"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({"error": "Failed to update persona. Please try again."}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=True, methods=["get"], url_path="get-niches")
     def get_niches(self, request, pk=None):

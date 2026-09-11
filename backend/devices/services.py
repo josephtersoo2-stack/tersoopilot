@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import urllib.parse
 import re
 import html
@@ -7,6 +8,8 @@ import requests
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("devices")
 
 # Pydantic schema used strictly for forcing the LLM's structured output format
 class DeviceFingerprintSchema(BaseModel):
@@ -161,7 +164,7 @@ def _search_web_for_device(device_query: str, target_sites_str: str = None) -> s
                 if len(snippet) > 25 and not any(snippet[:40] in r for r in results):
                     results.append(f"- [wikipedia.org / {item.get('title')}] {snippet}")
     except Exception as ex:
-        print(f"Wikipedia search query error: {ex}")
+        logger.debug("Wikipedia search query error: %s", ex)
 
     # 2. Targeted query incorporating the authoritative specification domains via DuckDuckGo
     primary_query = f"{clean_q} specifications processor soc gpu {' '.join(cleaned_domains[:2])}"
@@ -175,7 +178,7 @@ def _search_web_for_device(device_query: str, target_sites_str: str = None) -> s
                 if len(text) > 25 and not any(text[:40] in r for r in results):
                     results.append(f"- [web] {text}")
     except Exception as ex:
-        print(f"Targeted search query failed: {ex}")
+        logger.debug("Targeted search query failed: %s", ex)
 
     if results:
         sites_header = ", ".join(cleaned_domains)
@@ -231,129 +234,7 @@ def fetch_available_models_from_provider(provider: str, api_key: str = None) -> 
         except Exception as e:
             return {"provider": "openrouter", "models": [], "error": str(e)}
 
-GEMINI_CATALOG_MODELS = [
-    {
-        "id": "gemini-2.5-flash",
-        "name": "Gemini 2.5 Flash (Recommended)",
-        "description": "Fast multimodal flagship model with 1M token context, ideal for device blueprint generation.",
-        "context_length": 1048576,
-    },
-    {
-        "id": "gemini-2.5-pro",
-        "name": "Gemini 2.5 Pro",
-        "description": "Advanced reasoning, multimodal understanding and precision device profile synthesis.",
-        "context_length": 1048576,
-    },
-    {
-        "id": "gemini-2.5-flash-lite",
-        "name": "Gemini 2.5 Flash-Lite",
-        "description": "Ultra-low latency model engineered for sub-second blueprint generation.",
-        "context_length": 1048576,
-    },
-    {
-        "id": "gemini-2.0-flash",
-        "name": "Gemini 2.0 Flash",
-        "description": "Next-generation multimodal performance, high-speed structured generation.",
-        "context_length": 1048576,
-    },
-    {
-        "id": "gemini-2.0-flash-lite",
-        "name": "Gemini 2.0 Flash-Lite",
-        "description": "Cost-efficient high-speed model with 1M token context window.",
-        "context_length": 1048576,
-    },
-    {
-        "id": "gemini-1.5-flash",
-        "name": "Gemini 1.5 Flash",
-        "description": "Versatile lightweight model optimized for high-volume device profiling.",
-        "context_length": 1048576,
-    },
-    {
-        "id": "gemini-1.5-pro",
-        "name": "Gemini 1.5 Pro",
-        "description": "Multimodal model with 2M token context, high-fidelity parameter extraction.",
-        "context_length": 2097152,
-    },
-    {
-        "id": "gemini-1.5-flash-8b",
-        "name": "Gemini 1.5 Flash-8B",
-        "description": "High-volume, sub-second latency model for rapid device specs.",
-        "context_length": 1048576,
-    },
-    {
-        "id": "gemma-4-31b-it",
-        "name": "Gemma 4 31B IT",
-        "description": "Open weights Google instruction-tuned model.",
-        "context_length": 262144,
-    },
-    {
-        "id": "gemma-4-26b-a4b-it",
-        "name": "Gemma 4 26B A4B IT",
-        "description": "Efficient open weights Google instruction-tuned model.",
-        "context_length": 262144,
-    },
-    {
-        "id": "gemini-flash-latest",
-        "name": "Gemini Flash Latest",
-        "description": "Continuously updated pointer to the latest release of Gemini Flash.",
-        "context_length": 1048576,
-    },
-    {
-        "id": "gemini-pro-latest",
-        "name": "Gemini Pro Latest",
-        "description": "Continuously updated pointer to the latest release of Gemini Pro.",
-        "context_length": 1048576,
-    },
-]
 
-
-def fetch_available_models_from_provider(provider: str, api_key: str = None) -> dict:
-    """
-    Fetches all available models directly from the provider's API.
-    No models are hardcoded.
-    """
-    provider = (provider or "").lower().strip()
-
-    # 1. Resolve API key if not supplied
-    if not api_key:
-        try:
-            from .models import LLMConfig
-            cfg = LLMConfig.objects.filter(provider=provider, is_active=True).first()
-            if cfg and cfg.api_key.strip():
-                api_key = cfg.api_key.strip()
-        except Exception:
-            pass
-
-    if provider == "openrouter":
-        if not api_key:
-            api_key = os.getenv("OPENROUTER_API_KEY", "")
-
-        headers = {
-            "HTTP-Referer": "https://octobrowser.local",
-            "X-Title": "OctoMobile Anti-Detect",
-        }
-        if api_key and api_key != "your_openrouter_api_key_here":
-            headers["Authorization"] = f"Bearer {api_key}"
-
-        try:
-            resp = requests.get("https://openrouter.ai/api/v1/models", headers=headers, timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            raw_models = data.get("data", [])
-            models = []
-            for item in raw_models:
-                m_id = item.get("id")
-                if not m_id:
-                    continue
-                models.append({
-                    "id": m_id,
-                    "name": item.get("name") or m_id,
-                    "description": (item.get("description") or "")[:250],
-                    "context_length": item.get("context_length", 0)
-                })
-            return {"provider": "openrouter", "models": models, "count": len(models)}
-        except Exception as e:
-            return {"provider": "openrouter", "models": [], "error": str(e)}
 
     elif provider == "gemini":
         if not api_key:
@@ -390,7 +271,8 @@ def fetch_available_models_from_provider(provider: str, api_key: str = None) -> 
             # Fallback to direct REST API
             try:
                 resp = requests.get(
-                    f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    headers={"x-goog-api-key": api_key},
                     timeout=10
                 )
                 if resp.status_code == 200:
@@ -557,7 +439,7 @@ def _call_gemini(api_key: str, model_name: str, device_query: str, custom_prompt
             text = text[:-3]
         return json.loads(text.strip())
     except Exception as search_err:
-        print(f"Gemini live search grounding notice: {search_err}. Using structured schema generation.")
+        logger.info("Gemini live search grounding notice: %s. Using structured schema generation.", search_err)
 
     # Fallback attempt: Standard generation with strict Pydantic response schema
     response = client.models.generate_content(
@@ -596,7 +478,7 @@ def generate_device_specs_with_llm(device_query: str, provider_override: str = N
             elif provider == "openrouter":
                 model_name = getattr(settings, "saved_openrouter_model", None) or "google/gemini-3.8-flash"
     except Exception as e:
-        print(f"Error resolving saved model for provider {provider}: {e}")
+        logger.error("Error resolving saved model for provider %s: %s", provider, e)
 
     if not provider:
         provider = "openrouter"
@@ -611,7 +493,7 @@ def generate_device_specs_with_llm(device_query: str, provider_override: str = N
     target_sites_str = getattr(settings, "target_search_sites", "") or None
     search_context = _search_web_for_device(device_query, target_sites_str=target_sites_str)
     if search_context:
-        print(f"Live web search successfully retrieved specifications for '{device_query}'")
+        logger.info("Live web search successfully retrieved specifications for '%s'", device_query)
 
     if provider == "openrouter":
         if not api_key:
@@ -631,7 +513,7 @@ def generate_device_specs_with_llm(device_query: str, provider_override: str = N
             )
             return _normalize_device_specs(raw_specs)
         except Exception as ex:
-            print(f"OpenRouter API failed: {ex}, falling back to preset")
+            logger.warning("OpenRouter API failed: %s, falling back to preset", ex)
             return _get_fallback_specs(device_query)
 
     else:
@@ -653,7 +535,7 @@ def generate_device_specs_with_llm(device_query: str, provider_override: str = N
             )
             return _normalize_device_specs(raw_specs)
         except Exception as ex:
-            print(f"Gemini API failed: {ex}, falling back to preset")
+            logger.warning("Gemini API failed: %s, falling back to preset", ex)
             return _get_fallback_specs(device_query)
 
 

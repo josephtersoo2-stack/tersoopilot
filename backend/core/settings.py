@@ -14,6 +14,32 @@ if not SECRET_KEY:
     SECRET_KEY = "development-only-do-not-deploy-this-key"
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]").split(",") if h.strip()]
 
+# Safety: reject wildcard in non-debug mode
+if not DEBUG and "*" in ALLOWED_HOSTS:
+    raise ImproperlyConfigured("Wildcard '*' is not allowed in ALLOWED_HOSTS for production.")
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{levelname} {asctime} {module} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "root": {"handlers": ["console"], "level": "INFO"},
+    "loggers": {
+        "devices": {"handlers": ["console"], "level": "DEBUG" if DEBUG else "INFO", "propagate": False},
+        "automation": {"handlers": ["console"], "level": "DEBUG" if DEBUG else "INFO", "propagate": False},
+    },
+}
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -106,10 +132,20 @@ if os.getenv("POSTGRES_DB"):
 
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
-    "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.ScopedRateThrottle"],
-    "DEFAULT_THROTTLE_RATES": {"auth": "10/min", "ai": "20/min"},
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.ScopedRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "auth": "10/min",
+        "ai": "20/min",
+        "profiles": "60/min",
+        "cookies": "30/min",
+        "sync": "30/min",
+        "user": "120/min",
+    },
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.TokenAuthentication",
+        "core.authentication.ExpiringTokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_RENDERER_CLASSES": [
@@ -121,3 +157,6 @@ REST_FRAMEWORK = {
 }
 
 ASSISTANT_ALLOW_WRITES = os.getenv("ASSISTANT_ALLOW_WRITES", "False").lower() == "true"
+
+# Token expiry in hours (default: 72 hours / 3 days)
+TOKEN_EXPIRY_HOURS = int(os.getenv("TOKEN_EXPIRY_HOURS", "72"))

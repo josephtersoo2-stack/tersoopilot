@@ -1,6 +1,7 @@
 package com.multibrowser.antidetect.engine
 
 import android.content.Context
+import android.util.Log
 import com.multibrowser.antidetect.data.model.ProfileEntity
 import org.json.JSONObject
 import org.mozilla.geckoview.GeckoRuntime
@@ -10,45 +11,75 @@ import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.WebExtension
 import java.io.File
 import java.io.FileWriter
+import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Dedicated GeckoView Profile Engine providing:
+ * 1. True Profile Isolation: Separate GeckoRuntime instance per profile to ensure
+ *    memory, cache, storage, and web extension state are completely disjoint.
+ * 2. Deterministic Resource Shutdown: Explicit GeckoRuntime.shutdown() on profile close.
+ * 3. Atomic Configuration Writes: .tmp file writing followed by atomic filesystem rename.
+ * 4. Hardware-Backed Proxy Security: Credentials decrypted on-the-fly via CredentialVault.
+ * 5. Strict Cryptographic Envelope: Cookie decrypt boundary and HMAC-SHA256 message signing.
+ */
 class GeckoProfileEngine(private val context: Context) {
 
-    private var activeRuntime: GeckoRuntime? = null
+    private val TAG = "GeckoProfileEngine"
+
+    // Dedicated GeckoRuntime instance per profile ID
+    private val runtimes = ConcurrentHashMap<String, GeckoRuntime>()
+    // Native extension ports per profile ID
+    private val nativePorts = ConcurrentHashMap<String, WebExtension.Port>()
+    // Active Profile entities cached per profile ID
+    private val activeProfiles = ConcurrentHashMap<String, ProfileEntity>()
+    // Sessions registered per profile ID
+    private val profileSessions = ConcurrentHashMap<String, MutableList<GeckoSession>>()
+
     private var activeSession: GeckoSession? = null
-    private var nativePort: WebExtension.Port? = null
     private var currentProfile: ProfileEntity? = null
 
-    fun launchProfile(profile: ProfileEntity): GeckoSession {
-        currentProfile = profile
-        // Stop previous session safely
-        stopCurrentSession()
+    private val pendingCookieCallbacks = ConcurrentHashMap<String, (String, Int) -> Unit>()
 
-        // 1. Filesystem Sandbox per Profile ID
-        val profileDirectory = File(context.filesDir, "profiles/${profile.id}").apply {
+    fun getProfileDirectory(profileId: String): File {
+        return File(context.filesDir, "profiles/$profileId").apply {
             if (!exists()) mkdirs()
         }
+    }
 
-        // 2. Generate native YAML preferences (C++ ResistFingerprinting + WebRTC controls + Proxy)
-        val configFile = File(profileDirectory, "geckoview-config.yaml")
-        generateYamlConfiguration(configFile, profile)
+    fun getCookieDatabaseFile(profileId: String): File {
+        return File(getProfileDirectory(profileId), "cookies.sqlite")
+    }
 
-        // 3. Build or reuse GeckoRuntime
-        val runtime = activeRuntime ?: run {
+    /**
+     * Retrieves or constructs a dedicated, isolated GeckoRuntime for the given profile.
+     */
+    fun getOrCreateRuntime(profile: ProfileEntity): GeckoRuntime {
+        activeProfiles[profile.id] = profile
+        return runtimes.getOrPut(profile.id) {
+            Log.i(TAG, "Creating dedicated isolated GeckoRuntime for profile: ${profile.id} (${profile.name})")
+            val profileDirectory = getProfileDirectory(profile.id)
+            val configFile = File(profileDirectory, "geckoview-config.yaml")
+            generateYamlConfiguration(configFile, profile)
+
             val runtimeSettings = GeckoRuntimeSettings.Builder()
                 .configFilePath(configFile.absolutePath)
                 .consoleOutput(false)
                 .build()
 
             val newRuntime = GeckoRuntime.create(context, runtimeSettings)
-            activeRuntime = newRuntime
             installExtensionBridge(newRuntime, profile)
             newRuntime
         }
+    }
 
-        // Push latest profile config to extension if port is connected
+    fun launchProfile(profile: ProfileEntity): GeckoSession {
+        currentProfile = profile
+        // Stop previous single session safely
+        stopCurrentSession()
+
+        val runtime = getOrCreateRuntime(profile)
         sendConfigPayload(profile)
 
-        // 4. Initialize GeckoSession with isolated contextId and User-Agent
         val sessionSettings = GeckoSessionSettings.Builder()
             .suspendMediaWhenInactive(false) // Keeps background streams alive and decoding
             .usePrivateMode(false)
@@ -60,36 +91,18 @@ class GeckoProfileEngine(private val context: Context) {
         val session = GeckoSession(sessionSettings)
         session.open(runtime)
         this.activeSession = session
+        profileSessions.getOrPut(profile.id) { mutableListOf() }.add(session)
 
         return session
     }
 
-    private val profileSessions = mutableMapOf<String, MutableList<GeckoSession>>()
-
     fun createTabSession(profile: ProfileEntity): GeckoSession {
         currentProfile = profile
-        val profileDirectory = File(context.filesDir, "profiles/${profile.id}").apply {
-            if (!exists()) mkdirs()
-        }
-        val configFile = File(profileDirectory, "geckoview-config.yaml")
-        generateYamlConfiguration(configFile, profile)
-
-        val runtime = activeRuntime ?: run {
-            val runtimeSettings = GeckoRuntimeSettings.Builder()
-                .configFilePath(configFile.absolutePath)
-                .consoleOutput(false)
-                .build()
-
-            val newRuntime = GeckoRuntime.create(context, runtimeSettings)
-            activeRuntime = newRuntime
-            installExtensionBridge(newRuntime, profile)
-            newRuntime
-        }
-
+        val runtime = getOrCreateRuntime(profile)
         sendConfigPayload(profile)
 
         val sessionSettings = GeckoSessionSettings.Builder()
-            .suspendMediaWhenInactive(false) // Keeps background streams alive and decoding
+            .suspendMediaWhenInactive(false)
             .usePrivateMode(false)
             .contextId(profile.id)
             .userAgentOverride(profile.userAgent)
@@ -106,36 +119,73 @@ class GeckoProfileEngine(private val context: Context) {
         try {
             session.close()
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.w(TAG, "Error closing tab session for profile $profileId: ${e.message}")
         }
         profileSessions[profileId]?.remove(session)
     }
 
+    /**
+     * Closes all sessions associated with this profile and deterministically
+     * shuts down its dedicated GeckoRuntime instance, freeing all OS and native resources.
+     */
     fun closeProfile(profileId: String) {
+        Log.i(TAG, "Closing profile $profileId and releasing dedicated GeckoRuntime")
         profileSessions[profileId]?.forEach { session ->
             try {
                 session.close()
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.w(TAG, "Error closing session in closeProfile for $profileId: ${e.message}")
             }
         }
         profileSessions.remove(profileId)
+        nativePorts.remove(profileId)
+        activeProfiles.remove(profileId)
+
+        runtimes.remove(profileId)?.let { rt ->
+            try {
+                rt.shutdown()
+                Log.i(TAG, "GeckoRuntime for profile $profileId successfully shut down")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error shutting down GeckoRuntime for $profileId: ${e.message}", e)
+            }
+        }
     }
 
+    /**
+     * Stops all active sessions across all profiles and shuts down every dedicated GeckoRuntime.
+     */
     fun stopAll() {
+        Log.i(TAG, "Stopping all profiles and shutting down all GeckoRuntimes")
         profileSessions.values.flatten().forEach { session ->
             try {
                 session.close()
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.w(TAG, "Error closing session: ${e.message}")
             }
         }
         profileSessions.clear()
         activeSession?.close()
         activeSession = null
+
+        nativePorts.clear()
+        activeProfiles.clear()
+
+        runtimes.forEach { (pid, rt) ->
+            try {
+                rt.shutdown()
+                Log.i(TAG, "Cleanly shutdown GeckoRuntime for profile: $pid")
+            } catch (e: Exception) {
+                Log.w(TAG, "Error shutting down GeckoRuntime for $pid: ${e.message}")
+            }
+        }
+        runtimes.clear()
     }
 
-    private fun generateYamlConfiguration(targetFile: File, profile: ProfileEntity) {
+    /**
+     * Writes GeckoView preferences to disk using atomic replacement (.tmp write + atomic rename)
+     * and hardware-backed credential decryption for proxy authentication.
+     */
+    fun generateYamlConfiguration(targetFile: File, profile: ProfileEntity) {
         val webRtcArgs = when (profile.webRtcMode) {
             "Disabled" -> """
               - "--pref"
@@ -152,6 +202,10 @@ class GeckoProfileEngine(private val context: Context) {
               - "media.peerconnection.ice.no_host=true"
             """.trimIndent()
         }
+
+        // Decrypt proxy credentials on-the-fly from CredentialVault without leaking to database
+        val proxyUserDecrypted = CredentialVault.decrypt(profile.proxyUser)
+        val proxyPassDecrypted = CredentialVault.decrypt(profile.proxyPass)
 
         val proxyArgs = if (profile.proxyType != "DIRECT" && profile.proxyHost.isNotBlank()) {
             val pType = if (profile.proxyType == "SOCKS5") 2 else 1
@@ -191,10 +245,19 @@ class GeckoProfileEngine(private val context: Context) {
               $proxyArgs
         """.trimIndent()
 
-        FileWriter(targetFile, false).use { it.write(yaml) }
+        // Atomic file write to avoid partial/corrupt configuration on abrupt exit
+        val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp_${System.nanoTime()}")
+        try {
+            FileWriter(tempFile, false).use { it.write(yaml) }
+            if (!tempFile.renameTo(targetFile)) {
+                tempFile.copyTo(targetFile, overwrite = true)
+                tempFile.delete()
+            }
+        } catch (e: Exception) {
+            if (tempFile.exists()) tempFile.delete()
+            throw e
+        }
     }
-
-    private val pendingCookieCallbacks = java.util.concurrent.ConcurrentHashMap<String, (String, Int) -> Unit>()
 
     private fun installExtensionBridge(runtime: GeckoRuntime, profile: ProfileEntity) {
         val extensionUri = "resource://android/assets/extensions/antidetect/"
@@ -205,10 +268,15 @@ class GeckoProfileEngine(private val context: Context) {
                         ext.setMessageDelegate(
                             object : WebExtension.MessageDelegate {
                                 override fun onConnect(port: WebExtension.Port) {
-                                    nativePort = port
+                                    nativePorts[profile.id] = port
                                     port.setDelegate(object : WebExtension.PortDelegate {
                                         override fun onPortMessage(message: Any, source: WebExtension.Port) {
                                             if (message is JSONObject) {
+                                                // Verify message signature if present
+                                                if (message.has("signature") && !ExtensionMessageAuth.verifyMessage(message)) {
+                                                    Log.w(TAG, "Unauthenticated port message received from extension bridge")
+                                                    return
+                                                }
                                                 val action = message.optString("action")
                                                 if (action == "COOKIES_DUMP") {
                                                     val cookiesArray = message.optJSONArray("cookies")
@@ -221,16 +289,15 @@ class GeckoProfileEngine(private val context: Context) {
                                         }
 
                                         override fun onDisconnect(source: WebExtension.Port) {
-                                            if (nativePort == source) {
-                                                nativePort = null
+                                            if (nativePorts[profile.id] == source) {
+                                                nativePorts.remove(profile.id)
                                             }
                                         }
                                     })
-                                    currentProfile?.let {
-                                        sendConfigPayload(it)
-                                        if (it.cookiesJson.isNotBlank() && it.cookiesJson != "[]") {
-                                            restoreCookies(it.cookiesJson)
-                                        }
+
+                                    sendConfigPayload(profile)
+                                    if (profile.cookiesJson.isNotBlank() && profile.cookiesJson != "[]") {
+                                        restoreCookies(profile.cookiesJson, profile.id)
                                     }
                                 }
                             },
@@ -238,12 +305,12 @@ class GeckoProfileEngine(private val context: Context) {
                         )
                     }
                 },
-                { error -> error?.printStackTrace() }
+                { error -> Log.e(TAG, "Failed to install antidetect extension bridge: ${error?.message}", error) }
             )
     }
 
-    fun requestCookies(callback: (String, Int) -> Unit) {
-        val port = nativePort
+    fun requestCookies(profileId: String? = null, callback: (String, Int) -> Unit) {
+        val port = (if (profileId != null) nativePorts[profileId] else null) ?: nativePorts.values.firstOrNull()
         if (port == null) {
             callback("[]", 0)
             return
@@ -254,25 +321,34 @@ class GeckoProfileEngine(private val context: Context) {
             put("action", "GET_COOKIES")
             put("requestId", reqId)
         }
+        ExtensionMessageAuth.signMessage(payload)
         port.postMessage(payload)
     }
 
-    fun restoreCookies(cookiesJson: String) {
-        val port = nativePort ?: return
+    fun restoreCookies(cookiesJson: String, profileId: String? = null) {
+        val port = (if (profileId != null) nativePorts[profileId] else null) ?: nativePorts.values.firstOrNull() ?: return
         try {
             if (cookiesJson.isBlank() || cookiesJson == "[]") return
-            val jsonArray = org.json.JSONArray(cookiesJson)
+            val rawJson = try {
+                com.multibrowser.antidetect.sync.CookieEngine.decryptCookiePayload(cookiesJson)
+            } catch (_: Exception) {
+                cookiesJson
+            }
+            if (rawJson.isBlank() || rawJson == "[]") return
+            val jsonArray = org.json.JSONArray(rawJson)
             val payload = JSONObject().apply {
                 put("action", "SET_COOKIES")
                 put("cookies", jsonArray)
             }
+            ExtensionMessageAuth.signMessage(payload)
             port.postMessage(payload)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Error restoring cookies to browser profile: ${e.message}", e)
         }
     }
 
     private fun sendConfigPayload(profile: ProfileEntity) {
+        val port = nativePorts[profile.id] ?: return
         val payload = JSONObject().apply {
             put("action", "APPLY_PROFILE")
             put("cores", profile.cpuCores)
@@ -293,7 +369,8 @@ class GeckoProfileEngine(private val context: Context) {
                 put("fakeVideo", profile.selectedCameraVideoPath ?: "")
             })
         }
-        nativePort?.postMessage(payload)
+        ExtensionMessageAuth.signMessage(payload)
+        port.postMessage(payload)
     }
 
     fun stopCurrentSession() {

@@ -31,7 +31,7 @@ class RegisterView(APIView):
         if User.objects.filter(username__iexact=username).exists():
             return Response(
                 {
-                    "error": f"Username '{username}' is already registered. Please tap 'Sign In' instead.",
+                    "error": "This username is not available. Please choose another or sign in.",
                     "code": "USER_ALREADY_EXISTS"
                 },
                 status=status.HTTP_400_BAD_REQUEST
@@ -53,9 +53,9 @@ class RegisterView(APIView):
                 },
                 status=status.HTTP_201_CREATED
             )
-        except Exception as e:
+        except Exception:
             return Response(
-                {"error": f"Failed to create account: {str(e)}", "code": "SERVER_ERROR"},
+                {"error": "An unexpected error occurred. Please try again later.", "code": "SERVER_ERROR"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 

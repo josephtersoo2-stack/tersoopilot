@@ -15,11 +15,11 @@ data class ProfileEntity(
     val soc: String,
     val webGlVendor: String,
     val webGlRenderer: String,
-    val ramGb: Int,
-    val cpuCores: Int,
-    val screenWidth: Int,
-    val screenHeight: Int,
-    val dpr: Double,
+    val ramGb: Int = 8,
+    val cpuCores: Int = 8,
+    val screenWidth: Int = 412,
+    val screenHeight: Int = 915,
+    val dpr: Double = 2.625,
     // Proxy & Location Configuration
     val proxyType: String = "DIRECT", // DIRECT, HTTP, SOCKS5
     val proxyHost: String = "",
@@ -38,5 +38,9 @@ data class ProfileEntity(
     val historyJson: String = "[]",
     val tabsJson: String = "[]",
     val cloudSyncId: String = "",
-    val lastSyncedAt: Long = 0L
+    val lastSyncedAt: Long = 0L,
+    // Concurrency & Optimistic Versioning
+    val syncVersion: Int = 1,
+    val updatedAt: Long = 0L
 )
+

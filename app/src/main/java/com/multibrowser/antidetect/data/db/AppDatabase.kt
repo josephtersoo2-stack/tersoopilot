@@ -5,7 +5,11 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import android.util.Log
+import com.multibrowser.antidetect.data.model.ActionExecutionEntity
+import com.multibrowser.antidetect.data.model.ExecutionCheckpointEntity
 import com.multibrowser.antidetect.data.model.ProfileEntity
+import com.multibrowser.antidetect.data.model.RecoveryAttemptEntity
 import com.multibrowser.antidetect.data.model.SavedTabEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -13,11 +17,17 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 
+data class DatabaseMigration(
+    val fromVersion: Int,
+    val toVersion: Int,
+    val migrate: (SQLiteDatabase) -> Unit
+)
+
 class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
     context.applicationContext,
-    "antidetect_browser.db",
+    DATABASE_NAME,
     null,
-    2
+    DATABASE_VERSION
 ) {
     private val profilesFlow = MutableStateFlow<List<ProfileEntity>>(emptyList())
 
@@ -61,7 +71,9 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
                 historyJson TEXT DEFAULT '[]',
                 tabsJson TEXT DEFAULT '[]',
                 cloudSyncId TEXT DEFAULT '',
-                lastSyncedAt INTEGER DEFAULT 0
+                lastSyncedAt INTEGER DEFAULT 0,
+                syncVersion INTEGER DEFAULT 1,
+                updatedAt INTEGER DEFAULT 0
             )
             """.trimIndent()
         )
@@ -80,7 +92,49 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
             """.trimIndent()
         )
 
-        // Seed initial preset profile
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS execution_checkpoints (
+                jobId TEXT PRIMARY KEY,
+                profileId TEXT NOT NULL,
+                currentStateId TEXT NOT NULL,
+                executedSteps INTEGER DEFAULT 0,
+                lastCommand TEXT DEFAULT '',
+                status TEXT DEFAULT 'RUNNING',
+                updatedAt INTEGER DEFAULT 0
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_checkpoint_profile ON execution_checkpoints(profileId)")
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS action_executions (
+                actionId TEXT PRIMARY KEY,
+                jobId TEXT NOT NULL,
+                stateId TEXT NOT NULL,
+                command TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                executedAt INTEGER DEFAULT 0
+            )
+            """.trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_action_job ON action_executions(jobId)")
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS recovery_attempts (
+                jobId TEXT NOT NULL,
+                failedStep TEXT NOT NULL,
+                reason TEXT DEFAULT '',
+                attemptCount INTEGER DEFAULT 1,
+                lastAttempt INTEGER DEFAULT 0,
+                PRIMARY KEY (jobId, failedStep)
+            )
+            """.trimIndent()
+        )
+
+        // Seed default profile
         val defaultProfile = ProfileEntity(
             id = "default_samsung_a54",
             name = "Samsung Galaxy A54",
@@ -97,50 +151,29 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
             cpuCores = 8,
             screenWidth = 412,
             screenHeight = 915,
-            dpr = 2.625
+            dpr = 2.625,
+            syncVersion = 1,
+            updatedAt = System.currentTimeMillis()
         )
         insertProfileInternal(db, defaultProfile)
     }
 
-    override fun onOpen(db: SQLiteDatabase) {
-        super.onOpen(db)
-        db.execSQL(
-            """
-            CREATE TABLE IF NOT EXISTS browser_saved_tabs (
-                id TEXT PRIMARY KEY,
-                profileId TEXT NOT NULL,
-                title TEXT NOT NULL,
-                url TEXT NOT NULL,
-                tabOrder INTEGER DEFAULT 0,
-                isCurrentTab INTEGER DEFAULT 0,
-                updatedAt INTEGER DEFAULT 0
-            )
-            """.trimIndent()
-        )
-
-        // Ensure new columns exist in existing database without breaking user data
-        safelyAddColumn(db, "browser_profiles", "cookiesJson", "TEXT DEFAULT '[]'")
-        safelyAddColumn(db, "browser_profiles", "historyJson", "TEXT DEFAULT '[]'")
-        safelyAddColumn(db, "browser_profiles", "tabsJson", "TEXT DEFAULT '[]'")
-        safelyAddColumn(db, "browser_profiles", "cloudSyncId", "TEXT DEFAULT ''")
-        safelyAddColumn(db, "browser_profiles", "lastSyncedAt", "INTEGER DEFAULT 0")
-    }
-
-    private fun safelyAddColumn(db: SQLiteDatabase, table: String, column: String, type: String) {
-        try {
-            db.execSQL("ALTER TABLE $table ADD COLUMN $column $type")
-        } catch (_: Exception) {
-            // Column already exists
-        }
-    }
-
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion < 2) {
-            safelyAddColumn(db, "browser_profiles", "cookiesJson", "TEXT DEFAULT '[]'")
-            safelyAddColumn(db, "browser_profiles", "historyJson", "TEXT DEFAULT '[]'")
-            safelyAddColumn(db, "browser_profiles", "tabsJson", "TEXT DEFAULT '[]'")
-            safelyAddColumn(db, "browser_profiles", "cloudSyncId", "TEXT DEFAULT ''")
-            safelyAddColumn(db, "browser_profiles", "lastSyncedAt", "INTEGER DEFAULT 0")
+        Log.i(TAG, "Upgrading database from schema version $oldVersion to $newVersion")
+        for (migration in MIGRATIONS) {
+            if (oldVersion < migration.toVersion && newVersion >= migration.toVersion) {
+                db.beginTransaction()
+                try {
+                    Log.i(TAG, "Executing migration: ${migration.fromVersion} -> ${migration.toVersion}")
+                    migration.migrate(db)
+                    db.setTransactionSuccessful()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed migration ${migration.fromVersion} -> ${migration.toVersion}", e)
+                    throw e
+                } finally {
+                    db.endTransaction()
+                }
+            }
         }
     }
 
@@ -199,6 +232,8 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
             put("tabsJson", p.tabsJson)
             put("cloudSyncId", p.cloudSyncId)
             put("lastSyncedAt", p.lastSyncedAt)
+            put("syncVersion", p.syncVersion)
+            put("updatedAt", if (p.updatedAt > 0L) p.updatedAt else System.currentTimeMillis())
         }
         db.insertWithOnConflict(
             "browser_profiles",
@@ -262,7 +297,9 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
             historyJson = getColumnString(c, "historyJson", "[]"),
             tabsJson = getColumnString(c, "tabsJson", "[]"),
             cloudSyncId = getColumnString(c, "cloudSyncId", ""),
-            lastSyncedAt = getColumnLong(c, "lastSyncedAt", 0L)
+            lastSyncedAt = getColumnLong(c, "lastSyncedAt", 0L),
+            syncVersion = getColumnInt(c, "syncVersion", 1),
+            updatedAt = getColumnLong(c, "updatedAt", 0L)
         )
     }
 
@@ -305,6 +342,7 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
             val db = writableDatabase
             val cv = ContentValues().apply {
                 put("lastUsedTimestamp", timestamp)
+                put("updatedAt", System.currentTimeMillis())
             }
             db.update("browser_profiles", cv, "id = ?", arrayOf(id))
             refreshProfiles()
@@ -314,6 +352,7 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
             val db = writableDatabase
             val cv = ContentValues().apply {
                 put("cookieCount", count)
+                put("updatedAt", System.currentTimeMillis())
             }
             db.update("browser_profiles", cv, "id = ?", arrayOf(id))
             refreshProfiles()
@@ -333,6 +372,7 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
                 put("tabsJson", tabsJson)
                 put("cookieCount", cookieCount)
                 put("lastUsedTimestamp", System.currentTimeMillis())
+                put("updatedAt", System.currentTimeMillis())
             }
             db.update("browser_profiles", cv, "id = ?", arrayOf(id))
             refreshProfiles()
@@ -343,9 +383,62 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
             val cv = ContentValues().apply {
                 put("cloudSyncId", cloudSyncId)
                 put("lastSyncedAt", lastSyncedAt)
+                put("updatedAt", System.currentTimeMillis())
             }
             db.update("browser_profiles", cv, "id = ?", arrayOf(id))
             refreshProfiles()
+        }
+
+        override suspend fun updateProfileWithVersion(profile: ProfileEntity, expectedVersion: Int): Boolean = withContext(Dispatchers.IO) {
+            val db = writableDatabase
+            val newVersion = expectedVersion + 1
+            val now = System.currentTimeMillis()
+            val cv = ContentValues().apply {
+                put("name", profile.name)
+                put("description", profile.description)
+                put("tag", profile.tag)
+                put("brand", profile.brand)
+                put("modelName", profile.modelName)
+                put("modelCode", profile.modelCode)
+                put("androidVersion", profile.androidVersion)
+                put("userAgent", profile.userAgent)
+                put("soc", profile.soc)
+                put("webGlVendor", profile.webGlVendor)
+                put("webGlRenderer", profile.webGlRenderer)
+                put("ramGb", profile.ramGb)
+                put("cpuCores", profile.cpuCores)
+                put("screenWidth", profile.screenWidth)
+                put("screenHeight", profile.screenHeight)
+                put("dpr", profile.dpr)
+                put("proxyType", profile.proxyType)
+                put("proxyHost", profile.proxyHost)
+                put("proxyPort", profile.proxyPort)
+                put("proxyUser", profile.proxyUser)
+                put("proxyPass", profile.proxyPass)
+                put("timezone", profile.timezone)
+                put("language", profile.language)
+                put("webRtcMode", profile.webRtcMode)
+                put("cookiesJson", profile.cookiesJson)
+                put("historyJson", profile.historyJson)
+                put("tabsJson", profile.tabsJson)
+                put("cookieCount", profile.cookieCount)
+                put("cloudSyncId", profile.cloudSyncId)
+                put("lastSyncedAt", profile.lastSyncedAt)
+                put("syncVersion", newVersion)
+                put("updatedAt", now)
+            }
+            val rowsAffected = db.update(
+                "browser_profiles",
+                cv,
+                "id = ? AND syncVersion = ?",
+                arrayOf(profile.id, expectedVersion.toString())
+            )
+            if (rowsAffected > 0) {
+                refreshProfiles()
+                true
+            } else {
+                false
+            }
         }
 
         override suspend fun getTabsForProfile(profileId: String): List<SavedTabEntity> = withContext(Dispatchers.IO) {
@@ -401,11 +494,244 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
             db.delete("browser_saved_tabs", "profileId = ?", arrayOf(profileId))
             Unit
         }
+
+        // --- Execution Checkpoints ---
+
+        override suspend fun saveCheckpoint(checkpoint: ExecutionCheckpointEntity) = withContext(Dispatchers.IO) {
+            val db = writableDatabase
+            val cv = ContentValues().apply {
+                put("jobId", checkpoint.jobId)
+                put("profileId", checkpoint.profileId)
+                put("currentStateId", checkpoint.currentStateId)
+                put("executedSteps", checkpoint.executedSteps)
+                put("lastCommand", checkpoint.lastCommand)
+                put("status", checkpoint.status)
+                put("updatedAt", checkpoint.updatedAt)
+            }
+            db.insertWithOnConflict("execution_checkpoints", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+            Unit
+        }
+
+        override suspend fun getCheckpoint(jobId: String): ExecutionCheckpointEntity? = withContext(Dispatchers.IO) {
+            val db = readableDatabase
+            val cursor = db.rawQuery(
+                "SELECT * FROM execution_checkpoints WHERE jobId = ? LIMIT 1",
+                arrayOf(jobId)
+            )
+            cursor.use {
+                if (it.moveToFirst()) {
+                    ExecutionCheckpointEntity(
+                        jobId = it.getString(it.getColumnIndexOrThrow("jobId")),
+                        profileId = it.getString(it.getColumnIndexOrThrow("profileId")),
+                        currentStateId = it.getString(it.getColumnIndexOrThrow("currentStateId")),
+                        executedSteps = it.getInt(it.getColumnIndexOrThrow("executedSteps")),
+                        lastCommand = it.getString(it.getColumnIndexOrThrow("lastCommand")),
+                        status = it.getString(it.getColumnIndexOrThrow("status")),
+                        updatedAt = it.getLong(it.getColumnIndexOrThrow("updatedAt"))
+                    )
+                } else null
+            }
+        }
+
+        override suspend fun getLatestCheckpointForProfile(profileId: String): ExecutionCheckpointEntity? = withContext(Dispatchers.IO) {
+            val db = readableDatabase
+            val cursor = db.rawQuery(
+                "SELECT * FROM execution_checkpoints WHERE profileId = ? ORDER BY updatedAt DESC LIMIT 1",
+                arrayOf(profileId)
+            )
+            cursor.use {
+                if (it.moveToFirst()) {
+                    ExecutionCheckpointEntity(
+                        jobId = it.getString(it.getColumnIndexOrThrow("jobId")),
+                        profileId = it.getString(it.getColumnIndexOrThrow("profileId")),
+                        currentStateId = it.getString(it.getColumnIndexOrThrow("currentStateId")),
+                        executedSteps = it.getInt(it.getColumnIndexOrThrow("executedSteps")),
+                        lastCommand = it.getString(it.getColumnIndexOrThrow("lastCommand")),
+                        status = it.getString(it.getColumnIndexOrThrow("status")),
+                        updatedAt = it.getLong(it.getColumnIndexOrThrow("updatedAt"))
+                    )
+                } else null
+            }
+        }
+
+        override suspend fun findActiveCheckpoint(profileId: String): ExecutionCheckpointEntity? = withContext(Dispatchers.IO) {
+            val db = readableDatabase
+            val cursor = db.rawQuery(
+                "SELECT * FROM execution_checkpoints WHERE profileId = ? AND status = 'RUNNING' ORDER BY updatedAt DESC LIMIT 1",
+                arrayOf(profileId)
+            )
+            cursor.use {
+                if (it.moveToFirst()) {
+                    ExecutionCheckpointEntity(
+                        jobId = it.getString(it.getColumnIndexOrThrow("jobId")),
+                        profileId = it.getString(it.getColumnIndexOrThrow("profileId")),
+                        currentStateId = it.getString(it.getColumnIndexOrThrow("currentStateId")),
+                        executedSteps = it.getInt(it.getColumnIndexOrThrow("executedSteps")),
+                        lastCommand = it.getString(it.getColumnIndexOrThrow("lastCommand")),
+                        status = it.getString(it.getColumnIndexOrThrow("status")),
+                        updatedAt = it.getLong(it.getColumnIndexOrThrow("updatedAt"))
+                    )
+                } else null
+            }
+        }
+
+        override suspend fun updateCheckpointStatus(jobId: String, status: String) = withContext(Dispatchers.IO) {
+            val db = writableDatabase
+            val cv = ContentValues().apply {
+                put("status", status)
+                put("updatedAt", System.currentTimeMillis())
+            }
+            db.update("execution_checkpoints", cv, "jobId = ?", arrayOf(jobId))
+            Unit
+        }
+
+        override suspend fun clearCheckpoint(jobId: String) = withContext(Dispatchers.IO) {
+            val db = writableDatabase
+            db.delete("execution_checkpoints", "jobId = ?", arrayOf(jobId))
+            Unit
+        }
+
+        // --- Idempotent Physical Action Tracking ---
+
+        override suspend fun getActionOutcome(actionId: String): String? = withContext(Dispatchers.IO) {
+            val db = readableDatabase
+            val cursor = db.rawQuery(
+                "SELECT outcome FROM action_executions WHERE actionId = ? LIMIT 1",
+                arrayOf(actionId)
+            )
+            cursor.use {
+                if (it.moveToFirst()) it.getString(0) else null
+            }
+        }
+
+        override suspend fun recordAction(action: ActionExecutionEntity) = withContext(Dispatchers.IO) {
+            val db = writableDatabase
+            val cv = ContentValues().apply {
+                put("actionId", action.actionId)
+                put("jobId", action.jobId)
+                put("stateId", action.stateId)
+                put("command", action.command)
+                put("outcome", action.outcome)
+                put("executedAt", action.executedAt)
+            }
+            db.insertWithOnConflict("action_executions", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+            Unit
+        }
+
+        override suspend fun clearJobActions(jobId: String) = withContext(Dispatchers.IO) {
+            val db = writableDatabase
+            db.delete("action_executions", "jobId = ?", arrayOf(jobId))
+            Unit
+        }
+
+        // --- Recovery Attempts ---
+
+        override suspend fun recordRecoveryAttempt(jobId: String, failedStep: String, reason: String): Int = withContext(Dispatchers.IO) {
+            val db = writableDatabase
+            val currentCount = getRecoveryAttemptCount(jobId, failedStep)
+            val newCount = currentCount + 1
+            val cv = ContentValues().apply {
+                put("jobId", jobId)
+                put("failedStep", failedStep)
+                put("reason", reason)
+                put("attemptCount", newCount)
+                put("lastAttempt", System.currentTimeMillis())
+            }
+            db.insertWithOnConflict("recovery_attempts", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+            newCount
+        }
+
+        override suspend fun getRecoveryAttemptCount(jobId: String, failedStep: String): Int = withContext(Dispatchers.IO) {
+            val db = readableDatabase
+            val cursor = db.rawQuery(
+                "SELECT attemptCount FROM recovery_attempts WHERE jobId = ? AND failedStep = ? LIMIT 1",
+                arrayOf(jobId, failedStep)
+            )
+            cursor.use {
+                if (it.moveToFirst()) it.getInt(0) else 0
+            }
+        }
+
+        override suspend fun clearRecoveryAttempts(jobId: String) = withContext(Dispatchers.IO) {
+            val db = writableDatabase
+            db.delete("recovery_attempts", "jobId = ?", arrayOf(jobId))
+            Unit
+        }
     }
 
     fun profileDao(): ProfileDao = dao
 
     companion object {
+        const val DATABASE_NAME = "antidetect_browser.db"
+        const val DATABASE_VERSION = 4
+        private const val TAG = "AppDatabase"
+
+        private fun safelyAddColumn(db: SQLiteDatabase, table: String, column: String, type: String) {
+            try {
+                db.execSQL("ALTER TABLE $table ADD COLUMN $column $type")
+            } catch (_: Exception) {
+                // Column already exists
+            }
+        }
+
+        val MIGRATIONS = listOf(
+            DatabaseMigration(1, 2) { db ->
+                safelyAddColumn(db, "browser_profiles", "cookiesJson", "TEXT DEFAULT '[]'")
+                safelyAddColumn(db, "browser_profiles", "historyJson", "TEXT DEFAULT '[]'")
+                safelyAddColumn(db, "browser_profiles", "tabsJson", "TEXT DEFAULT '[]'")
+                safelyAddColumn(db, "browser_profiles", "cloudSyncId", "TEXT DEFAULT ''")
+                safelyAddColumn(db, "browser_profiles", "lastSyncedAt", "INTEGER DEFAULT 0")
+            },
+            DatabaseMigration(2, 3) { db ->
+                safelyAddColumn(db, "browser_profiles", "syncVersion", "INTEGER DEFAULT 1")
+                safelyAddColumn(db, "browser_profiles", "updatedAt", "INTEGER DEFAULT 0")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS execution_checkpoints (
+                        jobId TEXT PRIMARY KEY,
+                        profileId TEXT NOT NULL,
+                        currentStateId TEXT NOT NULL,
+                        executedSteps INTEGER DEFAULT 0,
+                        lastCommand TEXT DEFAULT '',
+                        updatedAt INTEGER DEFAULT 0
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_checkpoint_profile ON execution_checkpoints(profileId)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS recovery_attempts (
+                        jobId TEXT NOT NULL,
+                        failedStep TEXT NOT NULL,
+                        reason TEXT DEFAULT '',
+                        attemptCount INTEGER DEFAULT 1,
+                        lastAttempt INTEGER DEFAULT 0,
+                        PRIMARY KEY (jobId, failedStep)
+                    )
+                    """.trimIndent()
+                )
+            },
+            DatabaseMigration(3, 4) { db ->
+                safelyAddColumn(db, "execution_checkpoints", "status", "TEXT DEFAULT 'RUNNING'")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS action_executions (
+                        actionId TEXT PRIMARY KEY,
+                        jobId TEXT NOT NULL,
+                        stateId TEXT NOT NULL,
+                        command TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        executedAt INTEGER DEFAULT 0
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS idx_action_job ON action_executions(jobId)")
+            }
+        )
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 

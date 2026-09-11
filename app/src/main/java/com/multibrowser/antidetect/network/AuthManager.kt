@@ -2,16 +2,20 @@ package com.multibrowser.antidetect.network
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 object AuthManager {
+    private const val TAG = "AuthManager"
     private const val PREFS_NAME = "antidetect_auth_prefs"
     private const val KEY_TOKEN = "auth_token"
     private const val KEY_USER_ID = "user_id"
     private const val KEY_USERNAME = "username"
     private const val KEY_EMAIL = "email"
+    private const val KEY_EXPIRES_AT = "token_expires_at"
+    private const val KEY_REFRESH_TOKEN = "refresh_token"
 
     private const val KEY_SERVER_HOST = "server_host"
 
@@ -33,6 +37,13 @@ object AuthManager {
             if (!savedHost.isNullOrBlank()) {
                 try { RetrofitInstance.setHost(savedHost, clearCredentials = false) } catch (_: IllegalArgumentException) { logout() }
             }
+
+            if (isTokenExpired()) {
+                Log.i(TAG, "Stored session token has expired; clearing session.")
+                logout()
+                return
+            }
+
             val token = getAuthToken()
             val username = prefs?.getString(KEY_USERNAME, null)
             val id = prefs?.getInt(KEY_USER_ID, -1) ?: -1
@@ -50,7 +61,20 @@ object AuthManager {
         }
     }
 
+    /**
+     * Returns true if the token is past its expiration timestamp.
+     */
+    fun isTokenExpired(): Boolean {
+        val expiresAt = prefs?.getLong(KEY_EXPIRES_AT, 0L) ?: 0L
+        return expiresAt > 0L && System.currentTimeMillis() >= expiresAt
+    }
+
     fun getAuthToken(): String? {
+        if (isTokenExpired()) {
+            logout()
+            return null
+        }
+
         val stored = prefs?.getString(KEY_TOKEN, null) ?: return null
         return try {
             if (stored.startsWith("v1:")) TokenVault.decrypt(stored) else {
@@ -63,12 +87,22 @@ object AuthManager {
         }
     }
 
-    fun saveAuth(token: String, user: UserDto) {
+    fun saveAuth(
+        token: String,
+        user: UserDto,
+        expiresInHours: Long = 72L,
+        refreshToken: String? = null
+    ) {
+        val expiresAt = System.currentTimeMillis() + (expiresInHours * 3600 * 1000L)
         prefs?.edit()?.apply {
             putString(KEY_TOKEN, TokenVault.encrypt(token))
             putInt(KEY_USER_ID, user.id)
             putString(KEY_USERNAME, user.username)
             putString(KEY_EMAIL, user.email ?: "")
+            putLong(KEY_EXPIRES_AT, expiresAt)
+            if (refreshToken != null) {
+                putString(KEY_REFRESH_TOKEN, TokenVault.encrypt(refreshToken))
+            }
             apply()
         }
         _isLoggedIn.value = true
@@ -77,10 +111,23 @@ object AuthManager {
     }
 
     fun logout() {
-        prefs?.edit()?.remove(KEY_TOKEN)?.remove(KEY_USER_ID)?.remove(KEY_USERNAME)?.remove(KEY_EMAIL)?.apply()
+        prefs?.edit()?.apply {
+            remove(KEY_TOKEN)
+            remove(KEY_USER_ID)
+            remove(KEY_USERNAME)
+            remove(KEY_EMAIL)
+            remove(KEY_EXPIRES_AT)
+            remove(KEY_REFRESH_TOKEN)
+            apply()
+        }
         _isLoggedIn.value = false
         _currentUsername.value = null
         _currentUser.value = null
+    }
+
+    fun handleUnauthorized() {
+        Log.w(TAG, "Received 401 Unauthorized from backend. Invalidating local session.")
+        logout()
     }
 
     fun getServerHost(): String {

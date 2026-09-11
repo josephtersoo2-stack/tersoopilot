@@ -109,9 +109,8 @@ def home_status_view(request):
             </div>
 
             <div class="creds-box">
-                <div><strong>Django Admin Credentials:</strong></div>
-                <div style="margin-top: 6px;">Username: <strong>admin</strong></div>
-                <div>Password: <strong>admin123</strong></div>
+                <div><strong>Admin Access:</strong></div>
+                <div style="margin-top: 6px;">Use credentials configured via <code>python manage.py createsuperuser</code></div>
             </div>
         </div>
     </body>

@@ -14,31 +14,49 @@ import com.multibrowser.antidetect.automation.recovery.RecoveryEngine
 import com.multibrowser.antidetect.automation.recovery.RecoveryResult
 import com.multibrowser.antidetect.automation.verification.VerificationEngine
 import com.multibrowser.antidetect.automation.verification.VerificationResult
+import com.multibrowser.antidetect.data.db.AppDatabase
+import com.multibrowser.antidetect.data.model.ActionExecutionEntity
+import com.multibrowser.antidetect.data.model.ExecutionCheckpointEntity
 import com.multibrowser.antidetect.network.GhostPilotApiService
 import com.multibrowser.antidetect.network.RetrofitInstance
 import kotlinx.coroutines.*
 import org.mozilla.geckoview.GeckoSession
 
+/**
+ * GhostPilot Closed-Loop Automation Runner.
+ *
+ * Implements:
+ * 1. Persistent Execution State & Resumption across process death via ExecutionCheckpointEntity.
+ * 2. Idempotent Physical Native Interactions: Prevents duplicate gestures upon network retry.
+ * 3. Lifecycle-Safe Coroutine Management: Externally scoped execution without Activity leaks.
+ * 4. AI Recovery Safety Verification: Viewport boundary clamping and confidence thresholding.
+ * 5. Static DAG Pre-Validation via CommandRegistry.
+ * 6. Dynamic Server Limits: Configurable max_steps and timeout_seconds.
+ */
 class GhostPilotRunner(
     private val context: Context,
     val profileId: String,
-    var session: GeckoSession,
-    var targetView: View,
-    var inputController: InputController,
+    var session: GeckoSession?,
+    var targetView: View?,
+    var inputController: InputController?,
     var profileName: String = "",
-    var cloudSyncId: String = ""
+    var cloudSyncId: String = "",
+    private val runnerScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 ) {
     private val TAG = "GhostPilotRunner"
     private val api = RetrofitInstance.retrofit.create(GhostPilotApiService::class.java)
     private val gson = Gson()
 
-    private var snapshotBridge = SnapshotBridge(session)
+    private var snapshotBridge: SnapshotBridge? = session?.let { SnapshotBridge(it) }
     private val targetResolver = TargetResolver()
-    private var coordinateMapper = CoordinateMapper(targetView)
+    private var coordinateMapper: CoordinateMapper? = targetView?.let { CoordinateMapper(it) }
     private val verificationEngine = VerificationEngine()
-    private var recoveryEngine = RecoveryEngine(inputController, targetResolver)
+    private val db = AppDatabase.getDatabase(context)
+    private var recoveryEngine: RecoveryEngine? = inputController?.let { RecoveryEngine(it, targetResolver, db) }
 
-    private var runnerScope: CoroutineScope? = null
+    private var executionJob: Job? = null
+    private var heartbeatJob: Job? = null
+
     var isRunning by mutableStateOf(false)
         private set
 
@@ -57,13 +75,13 @@ class GhostPilotRunner(
     var getCurrentUrl: (() -> String)? = null
         set(value) {
             field = value
-            snapshotBridge.getCurrentUrl = value
+            snapshotBridge?.getCurrentUrl = value
         }
 
     var getCurrentTitle: (() -> String)? = null
         set(value) {
             field = value
-            snapshotBridge.getCurrentTitle = value
+            snapshotBridge?.getCurrentTitle = value
         }
 
     var onStateChanged: ((Boolean, String?) -> Unit)? = null
@@ -74,25 +92,38 @@ class GhostPilotRunner(
         this.inputController = newInputController
         this.snapshotBridge = SnapshotBridge(newSession, getCurrentUrl, getCurrentTitle)
         this.coordinateMapper = CoordinateMapper(newTargetView)
-        this.recoveryEngine = RecoveryEngine(newInputController, targetResolver)
+        this.recoveryEngine = RecoveryEngine(newInputController, targetResolver, db)
     }
 
     fun start() {
         if (isRunning) return
         isRunning = true
         onStateChanged?.invoke(true, currentStateId)
-        runnerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-        runnerScope?.launch {
+        executionJob = runnerScope.launch {
             Log.i(TAG, "GhostPilot runner started for profile: $profileId (name=$profileName, cloudSyncId=$cloudSyncId)")
             executionLoop()
         }
     }
 
     fun stop() {
+        val activeJobId = currentJobId
+        if (activeJobId != null) {
+            runnerScope.launch {
+                try {
+                    db.dao.clearCheckpoint(activeJobId)
+                    db.dao.clearRecoveryAttempts(activeJobId)
+                    db.dao.clearJobActions(activeJobId)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to clear checkpoint on stop: ${e.message}")
+                }
+            }
+        }
         isRunning = false
-        runnerScope?.cancel()
-        runnerScope = null
+        executionJob?.cancel()
+        executionJob = null
+        heartbeatJob?.cancel()
+        heartbeatJob = null
         pendingOutcome = null
         transitionId = null
         currentJobId = null
@@ -100,19 +131,56 @@ class GhostPilotRunner(
         currentStateId = null
         recordedWatchSeconds = 0
         onStateChanged?.invoke(false, null)
+
+        // Nullify view references to prevent leaking Activity or Views on destroy
+        targetView = null
+        inputController = null
+        coordinateMapper = null
+        recoveryEngine = null
+
         Log.i(TAG, "GhostPilot runner stopped for profile: $profileId")
     }
 
     private suspend fun executionLoop() {
         while (isRunning) {
             try {
-                // 1. Poll for pending job if idle
+                // 1. Resume from durable execution checkpoint if process was killed or interrupted
+                if (currentJobId == null) {
+                    val pendingCheckpoint = db.dao.findActiveCheckpoint(profileId)
+                        ?: db.dao.getLatestCheckpointForProfile(profileId)
+
+                    if (pendingCheckpoint != null && pendingCheckpoint.status == "RUNNING" &&
+                        (System.currentTimeMillis() - pendingCheckpoint.updatedAt < 12 * 3600 * 1000L)) {
+                        Log.i(TAG, "Restoring execution from persistent checkpoint: Job ${pendingCheckpoint.jobId} at step ${pendingCheckpoint.executedSteps}, state ${pendingCheckpoint.currentStateId}")
+                        currentJobId = pendingCheckpoint.jobId
+                        currentStateId = pendingCheckpoint.currentStateId
+                        executedSteps = pendingCheckpoint.executedSteps
+                        onStateChanged?.invoke(true, currentStateId)
+                    }
+                }
+
+                // 2. Poll for pending job if idle
                 if (currentJobId == null) {
                     val pollResp = api.pollJob(profileId, profileName.ifBlank { null }, cloudSyncId.ifBlank { null })
                     if (pollResp.has("work_available") && pollResp.get("work_available").asBoolean) {
-                        currentJobId = pollResp.get("job_id").asString
-                        currentStateId = pollResp.get("entry_state").asString
-                        currentDag = pollResp.getAsJsonObject("dag")
+                        val receivedJobId = pollResp.get("job_id").asString
+                        val receivedEntryState = pollResp.get("entry_state").asString
+                        val receivedDag = pollResp.getAsJsonObject("dag")
+
+                        // Static Pre-validation of DAG commands before claiming/executing
+                        val validation = CommandRegistry.validateDag(receivedDag)
+                        if (validation is CommandRegistry.ValidationResult.Invalid) {
+                            Log.e(TAG, "Rejecting job $receivedJobId: ${validation.reason}")
+                            currentJobId = receivedJobId
+                            handleTransition("FAILURE", error = "DAG validation rejected: ${validation.reason}")
+                            currentJobId = null
+                            currentDag = null
+                            continue
+                        }
+
+                        currentJobId = receivedJobId
+                        currentStateId = receivedEntryState
+                        currentDag = receivedDag
                         Log.i(TAG, "Claimed Job: $currentJobId. Entry State: $currentStateId")
                         onStateChanged?.invoke(true, currentStateId)
 
@@ -125,38 +193,85 @@ class GhostPilotRunner(
                     }
                 }
 
-                // Retry reporting an outcome without repeating the physical action.
+                // 3. Retry reporting pending outcome if previous transition network call failed
                 pendingOutcome?.let {
                     handleTransition(it)
                     pendingOutcome = null
                     return@let
                 }
+
                 if (currentJobId == null) continue
-                if (executedSteps >= 500 || android.os.SystemClock.elapsedRealtime() - jobStartedAt > 30 * 60 * 1000L) {
+
+                // 4. Dynamic Server-Configured Execution Limits
+                val maxSteps = currentDag?.get("max_steps")?.asInt ?: 500
+                val timeoutSeconds = currentDag?.get("timeout_seconds")?.asLong ?: 1800L
+                val timeoutMs = timeoutSeconds * 1000L
+
+                if (executedSteps >= maxSteps || (android.os.SystemClock.elapsedRealtime() - jobStartedAt > timeoutMs)) {
+                    Log.i(TAG, "Execution reached limits (steps=$executedSteps/$maxSteps, elapsed=${android.os.SystemClock.elapsedRealtime() - jobStartedAt}ms). Stopping runner.")
                     withContext(Dispatchers.Main) { stop() }
                     break
                 }
-                // 2. Fetch current DAG state definition
+
+                // 5. Fetch current DAG state definition
                 val states = currentDag?.getAsJsonObject("states")
                 val currentNode = states?.getAsJsonObject(currentStateId)
 
                 if (currentNode == null) {
                     Log.e(TAG, "Node $currentStateId not found in DAG. Marking failure.")
-                    handleTransition("FAILURE", error = "Node $currentStateId missing.")
+                    handleTransition("FAILURE", error = "Node $currentStateId missing from DAG.")
                     currentJobId = null
                     continue
                 }
 
                 val command = currentNode.get("command").asString
-                val params = currentNode.getAsJsonObject("params") ?: JsonObject()
-                Log.i(TAG, "Executing closed-loop step: [$currentStateId] -> Command: $command")
 
-                // 3. Dispatch closed-loop atomic command
-                val outcome = executeClosedLoopCommand(command, params)
+                // Persist execution checkpoint before running the physical action
+                currentJobId?.let { jId ->
+                    currentStateId?.let { sId ->
+                        db.dao.saveCheckpoint(
+                            ExecutionCheckpointEntity(
+                                jobId = jId,
+                                profileId = profileId,
+                                currentStateId = sId,
+                                executedSteps = executedSteps,
+                                lastCommand = command,
+                                status = "RUNNING",
+                                updatedAt = System.currentTimeMillis()
+                            )
+                        )
+                    }
+                }
+
+                val params = currentNode.getAsJsonObject("params") ?: JsonObject()
+                Log.i(TAG, "Executing step: [$currentStateId] -> Command: $command (step #$executedSteps)")
+
+                // 6. Action Idempotency Check
+                val actionId = "$currentJobId:$currentStateId:$executedSteps"
+                val cachedOutcome = db.dao.getActionOutcome(actionId)
+
+                val outcome = if (cachedOutcome != null) {
+                    Log.i(TAG, "Action $actionId already executed with outcome '$cachedOutcome'. Replaying cached outcome without re-triggering gestures.")
+                    cachedOutcome
+                } else {
+                    val result = executeClosedLoopCommand(command, params)
+                    db.dao.recordAction(
+                        ActionExecutionEntity(
+                            actionId = actionId,
+                            jobId = currentJobId!!,
+                            stateId = currentStateId!!,
+                            command = command,
+                            outcome = result,
+                            executedAt = System.currentTimeMillis()
+                        )
+                    )
+                    result
+                }
+
                 executedSteps++
                 pendingOutcome = outcome
 
-                // 4. Report transition to backend
+                // 7. Report transition to backend
                 handleTransition(outcome)
                 pendingOutcome = null
 
@@ -170,12 +285,17 @@ class GhostPilotRunner(
     }
 
     private suspend fun executeClosedLoopCommand(command: String, params: JsonObject): String {
+        val controller = inputController
+        val currentTargetView = targetView
+        val currentSession = session
+
         return when (command) {
             "NAVIGATE" -> {
                 val url = params.get("url")?.asString ?: "about:blank"
                 Log.i(TAG, "Navigating to: $url")
-                withContext(Dispatchers.Main) { session.loadUri(url) }
-                // Allow page load to initiate and initial DOM to settle
+                if (currentSession != null) {
+                    withContext(Dispatchers.Main) { currentSession.loadUri(url) }
+                }
                 delay(3500L)
                 "SUCCESS"
             }
@@ -191,7 +311,6 @@ class GhostPilotRunner(
                 executeGroundedClick(spec, params)
             }
 
-            // Semantic mappings for high-level YouTube commands
             "YT_TAP_SEARCH_BAR" -> {
                 val spec = TargetSpec(
                     role = "button",
@@ -201,10 +320,9 @@ class GhostPilotRunner(
                 )
                 val res = executeGroundedClick(spec, params, expectedState = "SEARCH_INPUT_ACTIVE")
                 if (res != "SUCCESS") {
-                    // Fallback to standard top-right search icon area
                     Log.i(TAG, "Grounded search icon fallback to organic top-right search icon")
-                    val width = targetView.width.toFloat().coerceAtLeast(1080f)
-                    inputController.tap(ScreenPoint(width * 0.90f, 140f))
+                    val width = (currentTargetView?.width?.toFloat() ?: 1080f).coerceAtLeast(1080f)
+                    controller?.tap(ScreenPoint(width * 0.90f, 140f))
                     delay(1200L)
                     "SUCCESS"
                 } else {
@@ -213,7 +331,7 @@ class GhostPilotRunner(
             }
 
             "YT_SUBMIT_SEARCH", "SUBMIT_INPUT" -> {
-                inputController.type("\n")
+                controller?.type("\n")
                 delay(3000L)
                 "SUCCESS"
             }
@@ -233,19 +351,19 @@ class GhostPilotRunner(
                 if (clickOutcome == "SUCCESS") {
                     "SUCCESS"
                 } else {
-                    // Fallback: If a target URL or ID is known, navigate directly!
                     if (!targetVideoUrl.isNullOrBlank() || !targetVideoId.isNullOrBlank()) {
                         val directUrl = if (!targetVideoId.isNullOrBlank()) "https://m.youtube.com/watch?v=$targetVideoId" else targetVideoUrl!!
                         Log.i(TAG, "Target video not clicked organically, using direct URL fallback: $directUrl")
-                        withContext(Dispatchers.Main) { session.loadUri(directUrl) }
+                        if (currentSession != null) {
+                            withContext(Dispatchers.Main) { currentSession.loadUri(directUrl) }
+                        }
                         delay(3500L)
                         "SUCCESS"
                     } else {
-                        // Click top video on results page
                         Log.i(TAG, "Clicking top video on results page")
-                        val width = targetView.width.toFloat().coerceAtLeast(1080f)
-                        val height = targetView.height.toFloat().coerceAtLeast(2400f)
-                        inputController.tap(ScreenPoint(width * 0.5f, height * 0.32f))
+                        val width = (currentTargetView?.width?.toFloat() ?: 1080f).coerceAtLeast(1080f)
+                        val height = (currentTargetView?.height?.toFloat() ?: 2400f).coerceAtLeast(2400f)
+                        controller?.tap(ScreenPoint(width * 0.5f, height * 0.32f))
                         delay(2500L)
                         "SUCCESS"
                     }
@@ -263,18 +381,23 @@ class GhostPilotRunner(
             }
 
             "YT_DISMISS_PRE_ROLL_AD", "DISMISS_POPUP" -> {
-                val dismissed = recoveryEngine.dismissBlockingOverlay(
-                    coordinateMapper = coordinateMapper,
-                    getSnapshot = { snapshotBridge.captureSnapshot() }
-                )
-                if (dismissed) "SUCCESS" else "SKIP"
+                val mapper = coordinateMapper
+                val bridge = snapshotBridge
+                val rec = recoveryEngine
+                if (mapper != null && bridge != null && rec != null) {
+                    val dismissed = rec.dismissBlockingOverlay(
+                        coordinateMapper = mapper,
+                        getSnapshot = { bridge.captureSnapshot() }
+                    )
+                    if (dismissed) "SUCCESS" else "SKIP"
+                } else "SKIP"
             }
 
             "TYPE_TEXT" -> {
                 val text = params.get("text")?.asString ?: ""
                 val wpm = params.get("wpm")?.asInt ?: 65
                 val typo = params.get("typo_probability")?.asDouble ?: 0.03
-                inputController.type(text, wpm, typo)
+                controller?.type(text, wpm, typo)
                 delay(400L)
                 "SUCCESS"
             }
@@ -283,17 +406,17 @@ class GhostPilotRunner(
                 val duration = params.get("duration_ms")?.asLong ?: 650L
                 val direction = params.get("direction")?.asString ?: "DOWN"
 
-                val width = targetView.width.toFloat().coerceAtLeast(720f)
-                val height = targetView.height.toFloat().coerceAtLeast(1280f)
+                val width = (currentTargetView?.width?.toFloat() ?: 720f).coerceAtLeast(720f)
+                val height = (currentTargetView?.height?.toFloat() ?: 1280f).coerceAtLeast(1280f)
 
                 if (direction == "DOWN") {
-                    inputController.swipe(
+                    controller?.swipe(
                         start = ScreenPoint(width * 0.5f, height * 0.75f),
                         end = ScreenPoint(width * 0.5f, height * 0.35f),
                         durationMs = duration
                     )
                 } else {
-                    inputController.swipe(
+                    controller?.swipe(
                         start = ScreenPoint(width * 0.5f, height * 0.35f),
                         end = ScreenPoint(width * 0.5f, height * 0.75f),
                         durationMs = duration
@@ -304,9 +427,9 @@ class GhostPilotRunner(
             }
 
             "YT_SHORTS_SWIPE" -> {
-                val width = targetView.width.toFloat().coerceAtLeast(720f)
-                val height = targetView.height.toFloat().coerceAtLeast(1280f)
-                inputController.swipe(
+                val width = (currentTargetView?.width?.toFloat() ?: 720f).coerceAtLeast(720f)
+                val height = (currentTargetView?.height?.toFloat() ?: 1280f).coerceAtLeast(1280f)
+                controller?.swipe(
                     start = ScreenPoint(width * 0.5f, height * 0.80f),
                     end = ScreenPoint(width * 0.5f, height * 0.20f),
                     durationMs = 450L
@@ -320,18 +443,17 @@ class GhostPilotRunner(
                 val checkInterval = 2000L
                 var elapsed = 0
 
-                // Kickstart video playback on mobile YouTube watch page
                 delay(2000L)
-                val width = targetView.width.toFloat().coerceAtLeast(1080f)
-                val height = targetView.height.toFloat().coerceAtLeast(2400f)
-                inputController.tap(ScreenPoint(width * 0.5f, height * 0.25f))
+                val width = (currentTargetView?.width?.toFloat() ?: 1080f).coerceAtLeast(1080f)
+                val height = (currentTargetView?.height?.toFloat() ?: 2400f).coerceAtLeast(2400f)
+                controller?.tap(ScreenPoint(width * 0.5f, height * 0.25f))
 
                 while (elapsed < targetDuration && isRunning) {
                     delay(checkInterval)
                     elapsed += (checkInterval / 1000).toInt()
                     recordedWatchSeconds = elapsed
 
-                    val snap = snapshotBridge.captureSnapshot(timeoutMs = 800L)
+                    val snap = snapshotBridge?.captureSnapshot(timeoutMs = 800L)
                     if (snap != null) {
                         if (snap.pageState == "AD_ACTIVE") return "AD_ACTIVE"
                         if (snap.pageState == "CONSENT_WALL") return "CONSENT_WALL"
@@ -356,11 +478,17 @@ class GhostPilotRunner(
         params: JsonObject,
         expectedState: String? = null
     ): String {
-        // 1. Precondition / Target Resolution with Self-Healing Recovery
-        val recoveryResult = recoveryEngine.recoverMissingTarget(
+        val bridge = snapshotBridge ?: return "FAILURE"
+        val mapper = coordinateMapper ?: return "FAILURE"
+        val controller = inputController ?: return "FAILURE"
+        val rec = recoveryEngine ?: return "FAILURE"
+
+        val recoveryResult = rec.recoverMissingTarget(
             spec = spec,
             maxScrollAttempts = params.get("max_scroll_depth")?.asInt ?: 3,
-            getSnapshot = { snapshotBridge.captureSnapshot() }
+            jobId = currentJobId,
+            stepId = currentStateId,
+            getSnapshot = { bridge.captureSnapshot() }
         )
 
         val (resolvedTarget, snapshot) = when (recoveryResult) {
@@ -373,24 +501,21 @@ class GhostPilotRunner(
             is RecoveryResult.Abort -> return "FAILURE"
         }
 
-        // 2. Coordinate Mapping
-        val screenRect = coordinateMapper.mapDomToScreen(
+        val screenRect = mapper.mapDomToScreen(
             rect = resolvedTarget.element.rect,
             dpr = snapshot.viewport.dpr
         )
-        val tapPoint = coordinateMapper.getOrganicTapPoint(screenRect)
+        val tapPoint = mapper.getOrganicTapPoint(screenRect)
         Log.i(TAG, "Target matching spec $spec resolved: ${resolvedTarget.element.id}. Grounded tap point: (${tapPoint.x}, ${tapPoint.y})")
 
-        // 3. Physical Native Interaction
-        inputController.tap(tapPoint)
+        controller.tap(tapPoint)
 
-        // 4. Assertive Verification
         val verifyTargetState = expectedState ?: params.get("verify_state")?.asString
         if (!verifyTargetState.isNullOrBlank()) {
             val verified = verificationEngine.verifyPageState(
                 expectedState = verifyTargetState,
                 timeoutMs = 5000L,
-                getSnapshot = { snapshotBridge.captureSnapshot() }
+                getSnapshot = { bridge.captureSnapshot() }
             )
             if (verified !is VerificationResult.Verified) {
                 Log.w(TAG, "Verification warning for state: $verifyTargetState. Proceeding with caution.")
@@ -428,6 +553,10 @@ class GhostPilotRunner(
 
         if (isTerminal || nextState == "exit") {
             Log.i(TAG, "Job $jobId finalized. Final State: $nextState")
+            db.dao.updateCheckpointStatus(jobId, "COMPLETED")
+            db.dao.clearCheckpoint(jobId)
+            db.dao.clearRecoveryAttempts(jobId)
+            db.dao.clearJobActions(jobId)
             currentJobId = null
             currentDag = null
             currentStateId = null
@@ -441,9 +570,12 @@ class GhostPilotRunner(
 
     private suspend fun requestAiRecoveryDecision(): String {
         val jobId = currentJobId ?: return "FAILURE"
+        val controller = inputController ?: return "FAILURE"
+        val bridge = snapshotBridge ?: return "FAILURE"
+
         Log.i(TAG, "Requesting Tier-2 AI Recovery Decision for Job: $jobId")
 
-        val snapshot = snapshotBridge.captureSnapshot()
+        val snapshot = bridge.captureSnapshot()
         val payload = mutableMapOf<String, Any>()
         if (snapshot != null) {
             payload["page_snapshot"] = gson.toJsonTree(snapshot)
@@ -451,16 +583,35 @@ class GhostPilotRunner(
 
         return try {
             val resp = api.requestDecision(jobId, payload)
+
+            // Confidence check to prevent acting on low-confidence AI predictions
+            val confidence = resp.get("confidence")?.asFloat ?: 1.0f
+            if (confidence < 0.8f) {
+                Log.w(TAG, "AI recovery decision rejected: confidence ($confidence) is below threshold 0.8")
+                return "FAILURE"
+            }
+
             val action = resp.get("action")?.asString ?: "BÉZIER_SWIPE"
 
             if (action == "TAP_COORDINATES") {
                 val x = resp.get("target_x")?.asFloat ?: 500f
                 val y = resp.get("target_y")?.asFloat ?: 500f
-                inputController.tap(ScreenPoint(x, y))
+
+                // Bounds validation: ensure coordinates stay strictly within view bounds
+                val view = targetView
+                if (view != null && view.width > 0 && view.height > 0) {
+                    if (x < 0f || y < 0f || x > view.width || y > view.height) {
+                        Log.w(TAG, "AI recovery coordinates ($x, $y) out of view bounds (${view.width}x${view.height}). Rejecting action.")
+                        return "FAILURE"
+                    }
+                }
+
+                controller.tap(ScreenPoint(x, y))
             } else if (action == "BÉZIER_SWIPE") {
-                val width = targetView.width.toFloat().coerceAtLeast(720f)
-                val height = targetView.height.toFloat().coerceAtLeast(1280f)
-                inputController.swipe(
+                val view = targetView
+                val width = (view?.width?.toFloat() ?: 720f).coerceAtLeast(720f)
+                val height = (view?.height?.toFloat() ?: 1280f).coerceAtLeast(1280f)
+                controller.swipe(
                     start = ScreenPoint(width * 0.5f, height * 0.70f),
                     end = ScreenPoint(width * 0.5f, height * 0.35f),
                     durationMs = 600L
@@ -474,7 +625,8 @@ class GhostPilotRunner(
     }
 
     private fun launchHeartbeat(jobId: String) {
-        runnerScope?.launch {
+        heartbeatJob?.cancel()
+        heartbeatJob = runnerScope.launch {
             while (isRunning && currentJobId == jobId) {
                 try {
                     val heartbeat = api.sendHeartbeat(jobId)
