@@ -18,6 +18,8 @@ from .models import (
     ProfileNicheAffiliation,
     AutomationTask,
     TaskExecutionQueue,
+    Execution,
+    ExecutionStatus,
     AIPromptConfig,
     AssistantSession,
     AssistantMessage,
@@ -78,15 +80,21 @@ class AutomationTaskViewSet(viewsets.ModelViewSet):
             compiled_dag = RecipeCompiler.compile_recipe(task, profile)
             DAGValidator.validate(compiled_dag)
 
-            job = TaskExecutionQueue.objects.create(
+            execution = Execution.objects.create(
                 task=task,
                 profile=profile,
-                status=TaskExecutionQueue.ExecutionStatus.PENDING,
+                status=ExecutionStatus.PENDING,
                 entry_state_id=compiled_dag.get("entry_state", "start"),
                 compiled_dag=compiled_dag,
                 current_state_id=compiled_dag.get("entry_state", "start")
             )
-            created_jobs.append(str(job.id))
+            TaskExecutionQueue.objects.create(
+                id=execution.id,
+                task=task,
+                profile=profile,
+                execution=execution
+            )
+            created_jobs.append(str(execution.id))
 
         return Response({
             "status": "DISPATCHED",
@@ -102,11 +110,11 @@ class GhostPilotViewSet(viewsets.ReadOnlyModelViewSet):
     Supports polling, state machine transitions, heartbeat liveness, operator aborts,
     AI-driven fallback decision engine, and SSE live telemetry streaming.
     """
-    queryset = TaskExecutionQueue.objects.all().order_by("-started_at")
+    queryset = Execution.objects.all().order_by("-started_at")
     serializer_class = TaskExecutionQueueSerializer
 
     def get_queryset(self):
-        return TaskExecutionQueue.objects.filter(profile__in=visible_profiles(self.request.user)).order_by("-started_at")
+        return Execution.objects.filter(profile__in=visible_profiles(self.request.user)).order_by("-started_at")
 
     def _handle_poll(self, request, profile_id):
         profiles = visible_profiles(request.user)
@@ -218,7 +226,7 @@ class GhostPilotViewSet(viewsets.ReadOnlyModelViewSet):
         }
         """
         job = self.get_object()
-        job = TaskExecutionQueue.objects.select_for_update().get(pk=job.pk)
+        job = Execution.objects.select_for_update().get(pk=job.pk)
         snapshot = request.data.get("page_snapshot", {})
         image_b64 = request.data.get("image_base64") or request.data.get("screenshot")
 
@@ -266,12 +274,12 @@ class GhostPilotViewSet(viewsets.ReadOnlyModelViewSet):
 
             once = request.query_params.get("once", "false").lower() in ("true", "1")
             if once or job.status in [
-                TaskExecutionQueue.ExecutionStatus.SUCCESS,
-                TaskExecutionQueue.ExecutionStatus.FAILED,
+                ExecutionStatus.SUCCESS,
+                ExecutionStatus.FAILED,
             ]:
                 if job.status in [
-                    TaskExecutionQueue.ExecutionStatus.SUCCESS,
-                    TaskExecutionQueue.ExecutionStatus.FAILED,
+                    ExecutionStatus.SUCCESS,
+                    ExecutionStatus.FAILED,
                 ]:
                     yield f"data: {json.dumps({'type': 'STATUS', 'status': job.status})}\n\n"
                 return
@@ -293,8 +301,8 @@ class GhostPilotViewSet(viewsets.ReadOnlyModelViewSet):
                     last_idx = len(current_logs)
 
                 if job.status in [
-                    TaskExecutionQueue.ExecutionStatus.SUCCESS,
-                    TaskExecutionQueue.ExecutionStatus.FAILED,
+                    ExecutionStatus.SUCCESS,
+                    ExecutionStatus.FAILED,
                 ]:
                     yield f"data: {json.dumps({'type': 'STATUS', 'status': job.status})}\n\n"
                     break

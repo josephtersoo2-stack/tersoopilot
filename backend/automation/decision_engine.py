@@ -2,10 +2,10 @@ import os
 import json
 import base64
 from abc import ABC, abstractmethod
-from typing import Optional, Literal, Dict, Any
+from typing import Optional, Literal, Dict, Any, Union
 from pydantic import BaseModel, Field
 
-from automation.models import TaskExecutionQueue, AIPromptConfig
+from automation.models import TaskExecutionQueue, AIPromptConfig, Execution
 
 
 class AgentRecoveryAction(BaseModel):
@@ -181,7 +181,7 @@ class GhostPilotDecisionEngine:
     @classmethod
     def resolve_stuck_state(
         cls,
-        job: TaskExecutionQueue,
+        job: Union[Execution, TaskExecutionQueue, Any],
         page_snapshot: Dict[str, Any],
         image_base64: Optional[str] = None
     ) -> AgentRecoveryAction:

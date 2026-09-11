@@ -32,7 +32,7 @@ class AutomationTaskAdmin(admin.ModelAdmin):
 
 @admin.register(TaskExecutionQueue)
 class TaskExecutionQueueAdmin(admin.ModelAdmin):
-    list_display = ("id", "task", "profile", "status", "started_at", "completed_at")
-    list_filter = ("status",)
+    list_display = ("id", "task", "profile", "created_at")
+    list_filter = ("execution__status", "created_at")
     search_fields = ("profile__name", "task__name", "id")
 

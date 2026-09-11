@@ -5,6 +5,7 @@ from .models import (
     ProfileNicheAffiliation,
     AutomationTask,
     TaskExecutionQueue,
+    Execution,
     AIPromptConfig,
     AssistantSession,
     AssistantMessage,
@@ -27,6 +28,7 @@ class ProfileNicheAffiliationSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProfileNicheAffiliation
         fields = ["id", "niche", "niche_name", "weight_percentage"]
+
 
 class AutomationTaskSerializer(serializers.ModelSerializer):
     niche_name = serializers.ReadOnlyField(source="niche.name")
@@ -51,7 +53,7 @@ class TaskExecutionQueueSerializer(serializers.ModelSerializer):
     task_name = serializers.ReadOnlyField(source="task.name")
 
     class Meta:
-        model = TaskExecutionQueue
+        model = Execution
         fields = "__all__"
 
 class AIPromptConfigSerializer(serializers.ModelSerializer):

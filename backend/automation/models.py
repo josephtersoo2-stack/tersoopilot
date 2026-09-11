@@ -1,5 +1,6 @@
 import uuid
 from django.db import models
+from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 from devices.models import SavedProfile
 
@@ -128,71 +129,265 @@ class AutomationTask(models.Model):
     def __str__(self):
         return f"[{self.category}] {self.name}"
 
+from executions.models import Execution, ExecutionStatus
+
+
+class TaskExecutionQueueQuerySet(models.QuerySet):
+    def filter(self, *args, **kwargs):
+        new_kwargs = {}
+        for k, v in kwargs.items():
+            if k == "status":
+                new_kwargs["execution__status"] = v
+            elif k.startswith("status__"):
+                new_kwargs["execution__" + k] = v
+            else:
+                new_kwargs[k] = v
+        return super().filter(*args, **new_kwargs)
+
+
 class TaskExecutionQueue(models.Model):
-    """State-machine DAG compiled job dispatched to Android GhostPilot."""
-    class ExecutionStatus(models.TextChoices):
-        PENDING = "PENDING", "Pending Dispatch"
-        DISPATCHED = "DISPATCHED", "Dispatched to Device"
-        RUNNING = "RUNNING", "Running"
-        SUCCESS = "SUCCESS", "Success"
-        FAILED = "FAILED", "Failed"
-        STALLED = "STALLED", "Stalled"
+    """
+    Dedicated dispatch queue connecting tasks, profiles, and their canonical Execution.
+    Maintains full backwards compatibility with legacy properties and manager filters.
+    """
+    ExecutionStatus = ExecutionStatus
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     task = models.ForeignKey(
         AutomationTask, 
         on_delete=models.CASCADE, 
-        related_name="executions"
+        related_name="queued_dispatches"
     )
     profile = models.ForeignKey(
         SavedProfile, 
         on_delete=models.CASCADE, 
-        related_name="executions"
+        related_name="queued_dispatches"
     )
-    status = models.CharField(
-        max_length=20, 
-        choices=ExecutionStatus.choices, 
-        default=ExecutionStatus.PENDING
+    execution = models.OneToOneField(
+        "executions.Execution", 
+        on_delete=models.CASCADE, 
+        related_name="dispatch_entry", 
+        null=True, 
+        blank=True
     )
-    entry_state_id = models.CharField(max_length=100, default="start")
-    compiled_dag = models.JSONField(default=dict)
-    current_state_id = models.CharField(max_length=100, default="start")
-    execution_context = models.JSONField(default=dict)
-    logs = models.JSONField(default=list)
-    error_message = models.TextField(blank=True, default="")
-    started_at = models.DateTimeField(null=True, blank=True)
-    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    objects = TaskExecutionQueueQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["profile", "created_at"]),
+            models.Index(fields=["task", "created_at"]),
+        ]
+
+    def __init__(self, *args, **kwargs):
+        legacy_keys = [
+            "status", "entry_state_id", "current_state_id", "compiled_dag",
+            "execution_context", "logs", "error_message", "started_at", "completed_at"
+        ]
+        self._legacy_attrs = {}
+        for k in legacy_keys:
+            if k in kwargs:
+                self._legacy_attrs[k] = kwargs.pop(k)
+
+        super().__init__(*args, **kwargs)
+
+        for k, v in self._legacy_attrs.items():
+            setattr(self, f"_{k}", v)
 
     def __str__(self):
-        return f"Queue {self.id} [{self.profile.name}] - {self.status}"
+        status_val = self.status if hasattr(self, "status") else "UNKNOWN"
+        return f"Queue {self.id} [{self.profile.name}] - {status_val}"
+
+    def save(self, *args, **kwargs):
+        from executions.models import Execution
+        if not self.execution_id:
+            exec_obj = Execution.objects.create(
+                id=self.id,
+                task=self.task,
+                profile=self.profile,
+                status=getattr(self, "_status", Execution.ExecutionStatus.PENDING),
+                entry_state_id=getattr(self, "_entry_state_id", "start"),
+                current_state_id=getattr(self, "_current_state_id", "start"),
+                compiled_dag=getattr(self, "_compiled_dag", {}),
+                execution_context=getattr(self, "_execution_context", {}),
+                logs=getattr(self, "_logs", []),
+                error_message=getattr(self, "_error_message", ""),
+                started_at=getattr(self, "_started_at", None),
+                completed_at=getattr(self, "_completed_at", None),
+            )
+            self.execution = exec_obj
+        else:
+            if self.execution:
+                if hasattr(self, "_status"):
+                    self.execution.status = self._status
+                if hasattr(self, "_entry_state_id"):
+                    self.execution.entry_state_id = self._entry_state_id
+                if hasattr(self, "_current_state_id"):
+                    self.execution.current_state_id = self._current_state_id
+                if hasattr(self, "_compiled_dag"):
+                    self.execution.compiled_dag = self._compiled_dag
+                if hasattr(self, "_execution_context"):
+                    self.execution.execution_context = self._execution_context
+                if hasattr(self, "_logs"):
+                    self.execution.logs = self._logs
+                if hasattr(self, "_error_message"):
+                    self.execution.error_message = self._error_message
+                if hasattr(self, "_started_at"):
+                    self.execution.started_at = self._started_at
+                if hasattr(self, "_completed_at"):
+                    self.execution.completed_at = self._completed_at
+                self.execution.save()
+        super().save(*args, **kwargs)
+
+    def refresh_from_db(self, *args, **kwargs):
+        super().refresh_from_db(*args, **kwargs)
+        if self.execution:
+            self.execution.refresh_from_db(*args, **kwargs)
+            self._status = self.execution.status
+            self._current_state_id = self.execution.current_state_id
+            self._error_message = self.execution.error_message
+            self._execution_context = self.execution.execution_context
+            self._logs = self.execution.logs
+            self._completed_at = self.execution.completed_at
+            self._started_at = self.execution.started_at
 
     @property
-    def current_state(self) -> str:
+    def status(self):
+        if self.execution:
+            return self.execution.status
+        return getattr(self, "_status", ExecutionStatus.PENDING)
+
+    @status.setter
+    def status(self, val):
+        self._status = val
+        if self.execution:
+            self.execution.status = val
+
+    @property
+    def entry_state_id(self):
+        if self.execution:
+            return self.execution.entry_state_id
+        return getattr(self, "_entry_state_id", "start")
+
+    @entry_state_id.setter
+    def entry_state_id(self, val):
+        self._entry_state_id = val
+        if self.execution:
+            self.execution.entry_state_id = val
+
+    @property
+    def current_state_id(self):
+        if self.execution:
+            return self.execution.current_state_id
+        return getattr(self, "_current_state_id", "start")
+
+    @current_state_id.setter
+    def current_state_id(self, val):
+        self._current_state_id = val
+        if self.execution:
+            self.execution.current_state_id = val
+
+    @property
+    def current_state(self):
         return self.current_state_id
 
     @current_state.setter
-    def current_state(self, value: str):
-        self.current_state_id = value
+    def current_state(self, val):
+        self.current_state_id = val
 
     @property
-    def context(self) -> dict:
+    def compiled_dag(self):
+        if self.execution:
+            return self.execution.compiled_dag
+        return getattr(self, "_compiled_dag", {})
+
+    @compiled_dag.setter
+    def compiled_dag(self, val):
+        self._compiled_dag = val
+        if self.execution:
+            self.execution.compiled_dag = val
+
+    @property
+    def execution_context(self):
+        if self.execution:
+            return self.execution.execution_context
+        return getattr(self, "_execution_context", {})
+
+    @execution_context.setter
+    def execution_context(self, val):
+        self._execution_context = val
+        if self.execution:
+            self.execution.execution_context = val
+
+    @property
+    def context(self):
         return self.execution_context
 
     @context.setter
-    def context(self, value: dict):
-        self.execution_context = value
+    def context(self, val):
+        self.execution_context = val
+
+    @property
+    def logs(self):
+        if self.execution:
+            return self.execution.logs
+        return getattr(self, "_logs", [])
+
+    @logs.setter
+    def logs(self, val):
+        self._logs = val
+        if self.execution:
+            self.execution.logs = val
+
+    @property
+    def error_message(self):
+        if self.execution:
+            return self.execution.error_message
+        return getattr(self, "_error_message", "")
+
+    @error_message.setter
+    def error_message(self, val):
+        self._error_message = val
+        if self.execution:
+            self.execution.error_message = val
+
+    @property
+    def started_at(self):
+        if self.execution:
+            return self.execution.started_at
+        return getattr(self, "_started_at", None)
+
+    @started_at.setter
+    def started_at(self, val):
+        self._started_at = val
+        if self.execution:
+            self.execution.started_at = val
+
+    @property
+    def completed_at(self):
+        if self.execution:
+            return self.execution.completed_at
+        return getattr(self, "_completed_at", None)
+
+    @completed_at.setter
+    def completed_at(self, val):
+        self._completed_at = val
+        if self.execution:
+            self.execution.completed_at = val
 
     @property
     def finished_at(self):
         return self.completed_at
 
     @finished_at.setter
-    def finished_at(self, value):
-        self.completed_at = value
+    def finished_at(self, val):
+        self.completed_at = val
 
 
-# Domain Model Alias
-Execution = TaskExecutionQueue
+# Domain Model Canonical Export
+Execution = Execution
 
 
 class AIPromptConfig(models.Model):

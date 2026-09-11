@@ -24,12 +24,12 @@ class Execution(models.Model):
     task = models.ForeignKey(
         "automation.AutomationTask",
         on_delete=models.CASCADE,
-        related_name="task_executions"
+        related_name="executions"
     )
     profile = models.ForeignKey(
         SavedProfile,
         on_delete=models.CASCADE,
-        related_name="profile_executions"
+        related_name="executions"
     )
     status = models.CharField(
         max_length=20,
@@ -100,7 +100,13 @@ class ExecutionLease(models.Model):
         on_delete=models.CASCADE,
         related_name="leases"
     )
-    execution_id = models.UUIDField(null=True, blank=True, db_index=True)
+    execution = models.OneToOneField(
+        Execution,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="lease"
+    )
     device_id = models.CharField(max_length=255, db_index=True)
     status = models.CharField(
         max_length=20,
@@ -119,7 +125,6 @@ class ExecutionLease(models.Model):
         indexes = [
             models.Index(fields=["profile", "status"]),
             models.Index(fields=["device_id", "status"]),
-            models.Index(fields=["execution_id", "status"]),
         ]
 
     def __str__(self):
@@ -149,7 +154,13 @@ class ExecutionEvent(models.Model):
     Provides discrete, queryable audit trail for dashboards and telemetry.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    execution_id = models.UUIDField(db_index=True)
+    execution = models.ForeignKey(
+        Execution,
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="events"
+    )
     event_type = models.CharField(
         max_length=50,
         choices=ExecutionEventType.choices,
@@ -161,7 +172,7 @@ class ExecutionEvent(models.Model):
     class Meta:
         ordering = ["created_at"]
         indexes = [
-            models.Index(fields=["execution_id", "created_at"]),
+            models.Index(fields=["execution", "created_at"]),
             models.Index(fields=["event_type", "created_at"]),
         ]
 

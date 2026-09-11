@@ -51,6 +51,7 @@ class ExecutionLeaseSerializer(serializers.ModelSerializer):
             "id",
             "profile",
             "profile_name",
+            "execution",
             "device_id",
             "status",
             "heartbeat_at",

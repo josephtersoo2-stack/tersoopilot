@@ -160,6 +160,29 @@ class ExecutionLeaseTests(TestCase):
         }, format="json")
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_lease_execution_onetoone_relation_and_cascade(self):
+        from executions.models import Execution, ExecutionStatus
+        from automation.models import AutomationTask
+        task = AutomationTask.objects.create(name="Lease Task")
+        execution = Execution.objects.create(
+            task=task,
+            profile=self.profile,
+            status=ExecutionStatus.PENDING
+        )
+        lease = ExecutionLease.objects.create(
+            profile=self.profile,
+            execution=execution,
+            device_id="device_cascade_test",
+            status=ExecutionLeaseStatus.ACTIVE,
+            expires_at=timezone.now() + datetime.timedelta(seconds=60)
+        )
+        self.assertEqual(lease.execution, execution)
+        self.assertEqual(execution.lease, lease)
+
+        # Deleting execution cascades to lease
+        execution.delete()
+        self.assertFalse(ExecutionLease.objects.filter(id=lease.id).exists())
+
 
 class DAGValidatorTests(TestCase):
     def test_valid_dag_passes(self):
