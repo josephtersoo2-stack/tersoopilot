@@ -121,6 +121,7 @@ def home_status_view(request):
 urlpatterns = [
     path("", home_status_view, name="home_status"),
     path("admin/", admin.site.urls),
+    path("api/executions/", include("executions.urls")),
     path("api/automation/", include("automation.urls")),
     path("api/", include("devices.urls")),
 ]

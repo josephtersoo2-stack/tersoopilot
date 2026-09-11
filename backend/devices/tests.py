@@ -147,3 +147,56 @@ class AccessAndIntegrityTests(TestCase):
         self.assertIn('error', result)
         self.job.refresh_from_db()
         self.assertEqual(self.job.status, 'RUNNING')
+
+    def test_secret_manager_encryption_and_decryption(self):
+        from .security import SecretManager
+        secret = "Ultra_Secret_Password_2026!"
+        encrypted = SecretManager.encrypt(secret)
+        self.assertTrue(encrypted.startswith("enc:v1:"))
+        self.assertNotEqual(encrypted, secret)
+        decrypted = SecretManager.decrypt(encrypted)
+        self.assertEqual(decrypted, secret)
+        # Plaintext fallback for backward compatibility
+        legacy_plaintext = "plain_legacy_pass"
+        self.assertEqual(SecretManager.decrypt(legacy_plaintext), legacy_plaintext)
+        self.assertEqual(SecretManager.encrypt(""), "")
+        self.assertEqual(SecretManager.decrypt(None), None)
+
+    def test_domain_decomposition_sync_and_transparent_proxy_decryption(self):
+        from .models import ProfileFingerprint, ProxyConfiguration, BrowserStorage
+        self.client.force_authenticate(self.owner)
+        profile = SavedProfile.objects.create(
+            user=self.owner,
+            name="Decomposition Test Profile",
+            brand="Google",
+            model_name="Pixel 8 Pro",
+            proxy_type="HTTP",
+            proxy_host="192.168.1.100",
+            proxy_port=8080,
+            proxy_pass="my_sensitive_proxy_pass",
+            cookies_data=json.dumps([{"name": "session", "value": "xyz", "domain": "example.com"}]),
+            tabs_data=json.dumps(["https://example.com/tab1"])
+        )
+        profile.refresh_from_db()
+        # Database value is encrypted
+        self.assertTrue(profile.proxy_pass.startswith("enc:v1:"))
+        self.assertEqual(profile.get_decrypted_proxy_pass(), "my_sensitive_proxy_pass")
+
+        # Satellite domain models are synchronized
+        fp = ProfileFingerprint.objects.get(profile=profile)
+        self.assertEqual(fp.brand, "Google")
+        self.assertEqual(fp.model_name, "Pixel 8 Pro")
+
+        proxy = ProxyConfiguration.objects.get(profile=profile)
+        self.assertEqual(proxy.proxy_host, "192.168.1.100")
+        self.assertEqual(proxy.proxy_port, 8080)
+        self.assertEqual(proxy.proxy_pass, "my_sensitive_proxy_pass")
+        self.assertEqual(proxy.encrypted_password, profile.proxy_pass)
+
+        storage = BrowserStorage.objects.get(profile=profile)
+        self.assertEqual(storage.cookie_count, 1)
+
+        # API endpoint transparently decrypts proxy_pass
+        res = self.client.get(f"/api/profiles/{profile.id}/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["proxy_pass"], "my_sensitive_proxy_pass")

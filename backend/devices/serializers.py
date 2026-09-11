@@ -77,6 +77,13 @@ class SavedProfileSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({field: f"Must be between {low} and {high}."})
         return attrs
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        if ret.get("proxy_pass"):
+            from .security import SecretManager
+            ret["proxy_pass"] = SecretManager.decrypt(ret["proxy_pass"])
+        return ret
+
 class CookieImportExportSerializer(serializers.Serializer):
     cookies = serializers.ListField(
         child=serializers.DictField(),

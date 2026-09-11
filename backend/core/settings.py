@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     "devices",
     "automation",
     "ai_assistant",
+    "executions",
 ]
 
 MIDDLEWARE = [

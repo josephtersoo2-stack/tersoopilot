@@ -1,6 +1,8 @@
 import uuid
+import json
 from django.db import models
 from django.contrib.auth.models import User
+from .security import SecretManager
 
 class SavedProfile(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -26,7 +28,7 @@ class SavedProfile(models.Model):
     proxy_host = models.CharField(max_length=255, blank=True, default="")
     proxy_port = models.IntegerField(default=0)
     proxy_user = models.CharField(max_length=100, blank=True, default="")
-    proxy_pass = models.CharField(max_length=100, blank=True, default="")
+    proxy_pass = models.CharField(max_length=255, blank=True, default="")
     web_rtc_mode = models.CharField(max_length=50, blank=True, default="Mdns")
 
     # Cloud Session Sync Data
@@ -40,8 +42,136 @@ class SavedProfile(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def save(self, *args, **kwargs):
+        # Automatically encrypt proxy_pass if provided in plaintext
+        if self.proxy_pass and not self.proxy_pass.startswith(SecretManager.PREFIX):
+            self.proxy_pass = SecretManager.encrypt(self.proxy_pass)
+        # Calculate cookie_count if not explicitly set and cookies_data is present
+        if not self.cookie_count and self.cookies_data and self.cookies_data != "[]":
+            try:
+                parsed = json.loads(self.cookies_data)
+                if isinstance(parsed, list):
+                    self.cookie_count = len(parsed)
+            except Exception:
+                pass
+        super().save(*args, **kwargs)
+
+        # Synchronize child domain models
+        try:
+            ProfileFingerprint.objects.update_or_create(
+                profile=self,
+                defaults={
+                    "brand": self.brand,
+                    "model_name": self.model_name,
+                    "model_code": self.model_code,
+                    "android_version": self.android_version,
+                    "soc": self.soc,
+                    "webgl_vendor": self.webgl_vendor,
+                    "webgl_renderer": self.webgl_renderer,
+                    "ram_gb": self.ram_gb,
+                    "cpu_cores": self.cpu_cores,
+                    "screen_width": self.screen_width,
+                    "screen_height": self.screen_height,
+                    "dpr": self.dpr,
+                    "user_agent": self.user_agent,
+                }
+            )
+            ProxyConfiguration.objects.update_or_create(
+                profile=self,
+                defaults={
+                    "proxy_type": self.proxy_type,
+                    "proxy_host": self.proxy_host,
+                    "proxy_port": self.proxy_port,
+                    "proxy_user": self.proxy_user,
+                    "encrypted_password": self.proxy_pass,
+                    "web_rtc_mode": self.web_rtc_mode,
+                }
+            )
+            BrowserStorage.objects.update_or_create(
+                profile=self,
+                defaults={
+                    "cookies_data": self.cookies_data,
+                    "history_data": self.history_data,
+                    "tabs_data": self.tabs_data,
+                    "cookie_count": self.cookie_count,
+                    "last_used_timestamp": self.last_used_timestamp,
+                }
+            )
+        except Exception:
+            pass
+
+    def get_decrypted_proxy_pass(self) -> str:
+        return SecretManager.decrypt(self.proxy_pass)
+
     def __str__(self):
         return f"{self.name} ({self.model_name})"
+
+# Domain Alias
+BrowserProfile = SavedProfile
+
+
+class ProfileFingerprint(models.Model):
+    """Encapsulates device hardware identity, GPU rendering, and OS fingerprint."""
+    profile = models.OneToOneField(SavedProfile, on_delete=models.CASCADE, related_name="fingerprint")
+    brand = models.CharField(max_length=100)
+    model_name = models.CharField(max_length=150)
+    model_code = models.CharField(max_length=100)
+    android_version = models.IntegerField(default=14)
+    soc = models.CharField(max_length=150)
+    webgl_vendor = models.CharField(max_length=100)
+    webgl_renderer = models.CharField(max_length=150)
+    ram_gb = models.IntegerField(default=8)
+    cpu_cores = models.IntegerField(default=8)
+    screen_width = models.IntegerField(default=384)
+    screen_height = models.IntegerField(default=854)
+    dpr = models.FloatField(default=2.8125)
+    user_agent = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Fingerprint [{self.brand} {self.model_name}]"
+
+
+class ProxyConfiguration(models.Model):
+    """Encapsulates proxy tunneling protocols, hosts, and encrypted credentials."""
+    profile = models.OneToOneField(SavedProfile, on_delete=models.CASCADE, related_name="proxy_config")
+    proxy_type = models.CharField(max_length=20, default="DIRECT")
+    proxy_host = models.CharField(max_length=255, blank=True, default="")
+    proxy_port = models.IntegerField(default=0)
+    proxy_user = models.CharField(max_length=100, blank=True, default="")
+    encrypted_password = models.CharField(max_length=255, blank=True, default="")
+    web_rtc_mode = models.CharField(max_length=50, blank=True, default="Mdns")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def proxy_pass(self) -> str:
+        return SecretManager.decrypt(self.encrypted_password)
+
+    @proxy_pass.setter
+    def proxy_pass(self, value: str):
+        self.encrypted_password = SecretManager.encrypt(value)
+
+    def __str__(self):
+        return f"Proxy [{self.proxy_type} {self.proxy_host}:{self.proxy_port}]"
+
+
+class BrowserStorage(models.Model):
+    """Encapsulates cookies, navigation history, and tab state snapshots."""
+    profile = models.OneToOneField(SavedProfile, on_delete=models.CASCADE, related_name="storage")
+    cookies_data = models.TextField(blank=True, default="[]")
+    history_data = models.TextField(blank=True, default="[]")
+    tabs_data = models.TextField(blank=True, default="[]")
+    cookie_count = models.IntegerField(default=0)
+    version = models.IntegerField(default=1)
+    last_used_timestamp = models.BigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Storage [{self.profile.name}: {self.cookie_count} cookies]"
+
 
 
 class LLMConfig(models.Model):
