@@ -149,21 +149,33 @@ class LLMAdapterFactory:
         provider = provider.upper()
 
         if provider in ["OPENROUTER", "OPENROUTER.AI"]:
-            api_key = cfg.get("openrouter_api_key") or os.environ.get("OPENROUTER_API_KEY")
+            api_key = cfg.get("openrouter_api_key")
+            if not api_key:
+                try:
+                    from ai_assistant.services import AIConfigService
+                    api_key = AIConfigService.get_api_key("openrouter")
+                except Exception:
+                    api_key = os.environ.get("OPENROUTER_API_KEY")
             if not api_key:
                 return None
             return OpenRouterAdapter(api_key=api_key, model_name=model_name)
 
         elif provider == "GEMINI":
-            api_key = cfg.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
+            api_key = cfg.get("gemini_api_key")
             if not api_key:
                 try:
-                    from devices.models import LLMConfig
-                    conf = LLMConfig.objects.filter(provider="gemini", is_active=True).first()
-                    if conf and conf.api_key:
-                        api_key = conf.api_key
+                    from ai_assistant.services import AIConfigService
+                    api_key = AIConfigService.get_api_key("gemini")
                 except Exception:
-                    pass
+                    try:
+                        from devices.models import LLMConfig
+                        conf = LLMConfig.objects.filter(provider="gemini", is_active=True).first()
+                        if conf and conf.api_key:
+                            api_key = conf.api_key
+                    except Exception:
+                        pass
+                    if not api_key:
+                        api_key = os.environ.get("GEMINI_API_KEY")
             if not api_key:
                 return None
             return GeminiAdapter(api_key=api_key, model_name=model_name)
@@ -209,7 +221,17 @@ class GhostPilotDecisionEngine:
             )
 
         # 3. Format dynamic system prompt template with runtime variables
-        raw_template = task_cfg.get("custom_system_prompt") or db_config.system_prompt
+        raw_template = task_cfg.get("custom_system_prompt")
+        if not raw_template:
+            try:
+                from ai_assistant.services import AIConfigService
+                from ai_assistant.models import PromptCategory
+                raw_template = AIConfigService.get_active_prompt(
+                    PromptCategory.DAG_RECOVERY,
+                    default=db_config.system_prompt
+                )
+            except Exception:
+                raw_template = db_config.system_prompt
         try:
             system_instruction = raw_template.format(
                 task_name=job.task.name if (hasattr(job, "task") and job.task) else "Unknown",

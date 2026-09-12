@@ -1,5 +1,56 @@
 from django.contrib import admin
-from .models import AssistantSession, AssistantMessage, AIPromptConfig
+from django import forms
+from .models import (
+    AssistantSession,
+    AssistantMessage,
+    AIPromptConfig,
+    AIProviderConfig,
+    PromptTemplate,
+    GlobalAISetting,
+)
+
+
+class AIProviderConfigAdminForm(forms.ModelForm):
+    api_key = forms.CharField(
+        widget=forms.PasswordInput(render_value=True),
+        required=False,
+        help_text="API key will be encrypted at rest with AES-256 Fernet."
+    )
+
+    class Meta:
+        model = AIProviderConfig
+        fields = "__all__"
+
+
+@admin.register(AIProviderConfig)
+class AIProviderConfigAdmin(admin.ModelAdmin):
+    form = AIProviderConfigAdminForm
+    list_display = ("name", "provider", "model_name", "temperature", "is_active", "updated_at")
+    list_filter = ("provider", "is_active")
+    search_fields = ("name", "model_name", "provider")
+    list_editable = ("is_active", "model_name", "temperature")
+    readonly_fields = ("id", "created_at", "updated_at")
+
+
+@admin.register(PromptTemplate)
+class PromptTemplateAdmin(admin.ModelAdmin):
+    list_display = ("name", "category", "is_active", "updated_at")
+    list_filter = ("category", "is_active")
+    search_fields = ("name", "system_prompt")
+    list_editable = ("is_active",)
+    readonly_fields = ("id", "created_at", "updated_at")
+
+
+@admin.register(GlobalAISetting)
+class GlobalAISettingAdmin(admin.ModelAdmin):
+    list_display = ("__str__", "selected_ai_provider", "max_active_profiles", "force_global_mute", "updated_at")
+    readonly_fields = ("singleton_id", "updated_at")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 class AssistantMessageInline(admin.TabularInline):

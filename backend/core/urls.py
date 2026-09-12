@@ -123,5 +123,6 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/executions/", include("executions.urls")),
     path("api/automation/", include("automation.urls")),
+    path("api/ai/", include("ai_assistant.urls")),
     path("api/", include("devices.urls")),
 ]

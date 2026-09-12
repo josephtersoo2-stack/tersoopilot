@@ -196,12 +196,16 @@ def fetch_available_models_from_provider(provider: str, api_key: str = None) -> 
     # 1. Resolve API key if not supplied
     if not api_key:
         try:
-            from .models import LLMConfig
-            cfg = LLMConfig.objects.filter(provider=provider, is_active=True).first()
-            if cfg and cfg.api_key.strip():
-                api_key = cfg.api_key.strip()
+            from ai_assistant.services import AIConfigService
+            api_key = AIConfigService.get_api_key(provider) or ""
         except Exception:
-            pass
+            try:
+                from .models import LLMConfig
+                cfg = LLMConfig.objects.filter(provider=provider, is_active=True).first()
+                if cfg and cfg.api_key.strip():
+                    api_key = cfg.api_key.strip()
+            except Exception:
+                pass
 
     if provider == "openrouter":
         if not api_key:
@@ -465,9 +469,18 @@ def generate_device_specs_with_llm(device_query: str, provider_override: str = N
 
     # Look up saved model and API key for this specific provider if no explicit model_override is provided
     try:
+        from ai_assistant.services import AIConfigService
+        api_key = AIConfigService.get_api_key(provider)
+        ai_cfg = AIConfigService.get_active_provider_config(provider)
+        if ai_cfg and not model_name and ai_cfg.model_name:
+            model_name = ai_cfg.model_name
+    except Exception:
+        pass
+
+    try:
         active_config = LLMConfig.objects.filter(provider=provider, is_active=True).first()
         if active_config:
-            if active_config.api_key.strip():
+            if not api_key and active_config.api_key.strip():
                 api_key = active_config.api_key.strip()
             if not model_name and active_config.model_name.strip():
                 model_name = active_config.model_name.strip()
@@ -484,7 +497,13 @@ def generate_device_specs_with_llm(device_query: str, provider_override: str = N
         provider = "openrouter"
 
     custom_prompt = None
-    if active_config and active_config.system_prompt and active_config.system_prompt.strip():
+    try:
+        from ai_assistant.services import AIConfigService
+        from ai_assistant.models import PromptCategory
+        custom_prompt = AIConfigService.get_active_prompt(PromptCategory.DEVICE_SYNTHESIS)
+    except Exception:
+        pass
+    if not custom_prompt and active_config and active_config.system_prompt and active_config.system_prompt.strip():
         custom_prompt = active_config.system_prompt.strip()
     if not custom_prompt:
         custom_prompt = getattr(settings, "ai_generation_prompt", None)

@@ -120,9 +120,11 @@ class TersoAssistantEngine:
         system_instruction: str,
         max_iterations: int,
     ) -> str:
-        from openai import OpenAI
-
-        api_key = os.environ.get("OPENROUTER_API_KEY")
+        try:
+            from ai_assistant.services import AIConfigService
+            api_key = AIConfigService.get_api_key("openrouter")
+        except Exception:
+            api_key = os.environ.get("OPENROUTER_API_KEY")
         if not api_key:
             msg = "Error: OPENROUTER_API_KEY is not configured in backend environment."
             AssistantMessage.objects.create(
@@ -131,6 +133,8 @@ class TersoAssistantEngine:
                 content=msg,
             )
             return msg
+
+        from openai import OpenAI
 
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
@@ -228,10 +232,11 @@ class TersoAssistantEngine:
         system_instruction: str,
         max_iterations: int,
     ) -> str:
-        from google import genai
-        from google.genai import types
-
-        api_key = os.environ.get("GEMINI_API_KEY")
+        try:
+            from ai_assistant.services import AIConfigService
+            api_key = AIConfigService.get_api_key("gemini")
+        except Exception:
+            api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             msg = "Error: GEMINI_API_KEY is not configured in backend environment."
             AssistantMessage.objects.create(
