@@ -180,7 +180,7 @@ class ProfileCookieExportView(APIView):
         if not profile:
             return Response({"error": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        raw_cookies = profile.cookies_data or "[]"
+        raw_cookies = profile.get_decrypted_cookies() or "[]"
         try:
             cookies_data = json.loads(raw_cookies)
         except Exception:

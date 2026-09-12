@@ -79,9 +79,11 @@ class SavedProfileSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
+        from .security import SecretManager
         if ret.get("proxy_pass"):
-            from .security import SecretManager
             ret["proxy_pass"] = SecretManager.decrypt(ret["proxy_pass"])
+        if ret.get("cookies_data"):
+            ret["cookies_data"] = SecretManager.decrypt(ret["cookies_data"])
         return ret
 
 class CookieImportExportSerializer(serializers.Serializer):

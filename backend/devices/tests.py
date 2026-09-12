@@ -92,7 +92,8 @@ class AccessAndIntegrityTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.profile.refresh_from_db()
         self.assertEqual(self.profile.cookie_count, 1)
-        self.assertEqual(json.loads(self.profile.cookies_data), [cookie])
+        self.assertTrue(self.profile.cookies_data.startswith("enc:v1:"))
+        self.assertEqual(json.loads(self.profile.get_decrypted_cookies()), [cookie])
 
     def test_invalid_sync_batch_rolls_back(self):
         self.client.force_authenticate(self.owner)
@@ -196,7 +197,44 @@ class AccessAndIntegrityTests(TestCase):
         storage = BrowserStorage.objects.get(profile=profile)
         self.assertEqual(storage.cookie_count, 1)
 
-        # API endpoint transparently decrypts proxy_pass
+        # Cookies are encrypted at rest in both SavedProfile and BrowserStorage
+        self.assertTrue(profile.cookies_data.startswith("enc:v1:"))
+        self.assertEqual(
+            json.loads(profile.get_decrypted_cookies()),
+            [{"name": "session", "value": "xyz", "domain": "example.com"}]
+        )
+        self.assertTrue(storage.cookies_data.startswith("enc:v1:"))
+        self.assertEqual(
+            json.loads(storage.decrypted_cookies),
+            [{"name": "session", "value": "xyz", "domain": "example.com"}]
+        )
+
+        # API endpoint transparently decrypts proxy_pass and cookies_data
         res = self.client.get(f"/api/profiles/{profile.id}/")
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data["proxy_pass"], "my_sensitive_proxy_pass")
+        self.assertEqual(
+            json.loads(res.data["cookies_data"]),
+            [{"name": "session", "value": "xyz", "domain": "example.com"}]
+        )
+
+    def test_cookie_export_and_import_with_encryption(self):
+        self.client.force_authenticate(self.owner)
+        cookies = [{"name": "auth_token", "value": "secret_session_jwt", "domain": "terso.app"}]
+        # Import cookies via API
+        import_resp = self.client.post(
+            f"/api/profiles/{self.profile.id}/cookies/import/",
+            {"cookies": cookies},
+            format="json"
+        )
+        self.assertEqual(import_resp.status_code, 200)
+        self.profile.refresh_from_db()
+        # Ensure encrypted at rest
+        self.assertTrue(self.profile.cookies_data.startswith("enc:v1:"))
+        self.assertEqual(self.profile.cookie_count, 1)
+        self.assertEqual(json.loads(self.profile.get_decrypted_cookies()), cookies)
+
+        # Ensure exported via API in plaintext JSON
+        export_resp = self.client.get(f"/api/profiles/{self.profile.id}/cookies/export/")
+        self.assertEqual(export_resp.status_code, 200)
+        self.assertEqual(export_resp.data["cookies"], cookies)

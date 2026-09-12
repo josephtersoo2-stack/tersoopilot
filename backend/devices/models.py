@@ -49,11 +49,15 @@ class SavedProfile(models.Model):
         # Calculate cookie_count if not explicitly set and cookies_data is present
         if not self.cookie_count and self.cookies_data and self.cookies_data != "[]":
             try:
-                parsed = json.loads(self.cookies_data)
+                decrypted = SecretManager.decrypt(self.cookies_data)
+                parsed = json.loads(decrypted)
                 if isinstance(parsed, list):
                     self.cookie_count = len(parsed)
             except Exception:
                 pass
+        # Automatically encrypt cookies_data if provided in plaintext
+        if self.cookies_data and self.cookies_data != "[]" and not self.cookies_data.startswith(SecretManager.PREFIX):
+            self.cookies_data = SecretManager.encrypt(self.cookies_data)
         super().save(*args, **kwargs)
 
         # Synchronize child domain models
@@ -102,6 +106,13 @@ class SavedProfile(models.Model):
 
     def get_decrypted_proxy_pass(self) -> str:
         return SecretManager.decrypt(self.proxy_pass)
+
+    def get_decrypted_cookies(self) -> str:
+        return SecretManager.decrypt(self.cookies_data)
+
+    @property
+    def decrypted_cookies(self) -> str:
+        return SecretManager.decrypt(self.cookies_data)
 
     def __str__(self):
         return f"{self.name} ({self.model_name})"
@@ -168,6 +179,18 @@ class BrowserStorage(models.Model):
     last_used_timestamp = models.BigIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def save(self, *args, **kwargs):
+        if self.cookies_data and self.cookies_data != "[]" and not self.cookies_data.startswith(SecretManager.PREFIX):
+            self.cookies_data = SecretManager.encrypt(self.cookies_data)
+        super().save(*args, **kwargs)
+
+    def get_decrypted_cookies(self) -> str:
+        return SecretManager.decrypt(self.cookies_data)
+
+    @property
+    def decrypted_cookies(self) -> str:
+        return SecretManager.decrypt(self.cookies_data)
 
     def __str__(self):
         return f"Storage [{self.profile.name}: {self.cookie_count} cookies]"
