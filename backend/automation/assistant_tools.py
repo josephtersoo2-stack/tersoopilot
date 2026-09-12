@@ -17,6 +17,8 @@ from automation.models import (
     TaskExecutionQueue,
     PlatformCategory
 )
+from executions.models import Execution, ExecutionStatus
+from executions.services import ExecutionService
 from automation.compiler import RecipeCompiler
 
 
@@ -28,14 +30,14 @@ def tool_get_fleet_status() -> Dict[str, Any]:
     """Returns a high-level summary of total browser profiles, running jobs,
     pending jobs, failed jobs, and maturation score distributions."""
     total_profiles = SavedProfile.objects.count()
-    active_jobs = TaskExecutionQueue.objects.filter(
-        status=TaskExecutionQueue.ExecutionStatus.RUNNING
+    active_jobs = Execution.objects.filter(
+        status=ExecutionStatus.RUNNING
     ).count()
-    pending_jobs = TaskExecutionQueue.objects.filter(
-        status=TaskExecutionQueue.ExecutionStatus.PENDING
+    pending_jobs = Execution.objects.filter(
+        status=ExecutionStatus.PENDING
     ).count()
-    failed_jobs = TaskExecutionQueue.objects.filter(
-        status=TaskExecutionQueue.ExecutionStatus.FAILED
+    failed_jobs = Execution.objects.filter(
+        status=ExecutionStatus.FAILED
     ).count()
 
     stages = {}
@@ -283,15 +285,21 @@ def tool_dispatch_campaign(
         if not profile:
             continue
         dag = RecipeCompiler.compile_recipe(task, profile)
-        job = TaskExecutionQueue.objects.create(
+        execution = Execution.objects.create(
             task=task,
             profile=profile,
-            status=TaskExecutionQueue.ExecutionStatus.PENDING,
-            entry_state_id=dag["entry_state"],
+            status=ExecutionStatus.PENDING,
+            entry_state_id=dag.get("entry_state", "start"),
             compiled_dag=dag,
-            current_state_id=dag["entry_state"]
+            current_state_id=dag.get("entry_state", "start")
         )
-        created_jobs.append(str(job.id))
+        TaskExecutionQueue.objects.create(
+            id=execution.id,
+            task=task,
+            profile=profile,
+            execution=execution
+        )
+        created_jobs.append(str(execution.id))
 
     return {
         "status": "DISPATCHED",
@@ -307,35 +315,33 @@ def tool_abort_job(
 ) -> Dict[str, Any]:
     """Immediately halts an active or running profile execution job."""
     try:
-        job = TaskExecutionQueue.objects.get(id=job_id)
-        job.status = TaskExecutionQueue.ExecutionStatus.FAILED
-        job.error_message = f"TersoAssistant abort: {reason}"
-        job.save()
+        execution = Execution.objects.get(id=job_id)
+        ExecutionService.abort(job=execution, reason=f"TersoAssistant abort: {reason}")
         return {
             "status": "ABORTED",
-            "job_id": str(job.id),
+            "job_id": str(execution.id),
             "new_status": "FAILED"
         }
-    except TaskExecutionQueue.DoesNotExist:
+    except (Execution.DoesNotExist, ValueError):
         return {"error": f"Job {job_id} not found."}
 
 
 def tool_get_job_telemetry(job_id: str) -> Dict[str, Any]:
     """Fetches current state node, outcome history, and error logs for an execution job."""
     try:
-        job = TaskExecutionQueue.objects.get(id=job_id)
-        logs = job.logs if isinstance(job.logs, list) else []
+        execution = Execution.objects.get(id=job_id)
+        logs = execution.logs if isinstance(execution.logs, list) else []
         return {
-            "job_id": str(job.id),
-            "profile": job.profile.name,
-            "task": job.task.name,
-            "status": job.status,
-            "current_state_id": job.current_state_id,
+            "job_id": str(execution.id),
+            "profile": execution.profile.name,
+            "task": execution.task.name,
+            "status": execution.status,
+            "current_state_id": execution.current_state_id,
             "logs_count": len(logs),
             "recent_logs": logs[-5:],
-            "error_message": job.error_message
+            "error_message": execution.error_message
         }
-    except TaskExecutionQueue.DoesNotExist:
+    except (Execution.DoesNotExist, ValueError):
         return {"error": f"Job {job_id} not found."}
 
 
