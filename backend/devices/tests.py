@@ -238,3 +238,36 @@ class AccessAndIntegrityTests(TestCase):
         export_resp = self.client.get(f"/api/profiles/{self.profile.id}/cookies/export/")
         self.assertEqual(export_resp.status_code, 200)
         self.assertEqual(export_resp.data["cookies"], cookies)
+
+    def test_device_registration_and_heartbeat_api(self):
+        from .models import Device, DeviceStatus
+        self.client.force_authenticate(self.owner)
+        payload = {
+            "device_id": "pixel_8_pro_node_1",
+            "device_sync_id": "phone_alpha",
+            "platform": "ANDROID",
+            "brand": "Google",
+            "model_name": "Pixel 8 Pro",
+            "app_version": "1.0.5",
+            "metadata": {"battery": 95}
+        }
+        # Register device
+        reg_resp = self.client.post("/api/devices/register/", payload, format="json")
+        self.assertEqual(reg_resp.status_code, 200)
+        self.assertEqual(reg_resp.data["device_id"], "pixel_8_pro_node_1")
+        self.assertTrue(reg_resp.data["is_online"])
+
+        device = Device.objects.get(device_id="pixel_8_pro_node_1")
+        self.assertEqual(device.owner, self.owner)
+        self.assertEqual(device.status, DeviceStatus.ONLINE)
+
+        # Heartbeat
+        hb_resp = self.client.post("/api/devices/heartbeat/", {"device_id": "pixel_8_pro_node_1"}, format="json")
+        self.assertEqual(hb_resp.status_code, 200)
+        self.assertEqual(hb_resp.data["status"], "ALIVE")
+
+        # Registry list
+        list_resp = self.client.get("/api/devices/registry/")
+        self.assertEqual(list_resp.status_code, 200)
+        self.assertGreaterEqual(len(list_resp.data), 1)
+        self.assertEqual(list_resp.data[0]["device_id"], "pixel_8_pro_node_1")

@@ -1,6 +1,6 @@
 import json
 from rest_framework import serializers
-from .models import SavedProfile, GlobalSetting
+from .models import SavedProfile, GlobalSetting, Device
 
 class GlobalSettingSerializer(serializers.ModelSerializer):
     class Meta:
@@ -97,3 +97,29 @@ class CookieImportExportSerializer(serializers.Serializer):
             if "name" not in item or "value" not in item or ("domain" not in item and "host" not in item):
                 raise serializers.ValidationError("Each cookie must have 'name', 'value', and 'domain'/'host'.")
         return value
+
+
+class DeviceSerializer(serializers.ModelSerializer):
+    is_online = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Device
+        fields = [
+            "id", "owner", "device_id", "device_sync_id", "platform",
+            "brand", "model_name", "app_version", "status", "last_seen",
+            "metadata", "is_online", "created_at", "updated_at"
+        ]
+        read_only_fields = ["id", "owner", "last_seen", "created_at", "updated_at"]
+
+    def get_is_online(self, obj) -> bool:
+        return obj.is_online()
+
+
+class DeviceRegisterRequestSerializer(serializers.Serializer):
+    device_id = serializers.CharField(max_length=255, required=True)
+    device_sync_id = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
+    platform = serializers.CharField(max_length=50, required=False, default="ANDROID")
+    brand = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
+    model_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+    app_version = serializers.CharField(max_length=50, required=False, allow_blank=True, default="")
+    metadata = serializers.DictField(required=False, default=dict)

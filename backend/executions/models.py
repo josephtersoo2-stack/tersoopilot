@@ -107,6 +107,13 @@ class ExecutionLease(models.Model):
         on_delete=models.CASCADE,
         related_name="lease"
     )
+    registered_device = models.ForeignKey(
+        "devices.Device",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="leases"
+    )
     device_id = models.CharField(max_length=255, db_index=True)
     status = models.CharField(
         max_length=20,
@@ -129,6 +136,16 @@ class ExecutionLease(models.Model):
 
     def __str__(self):
         return f"Lease {self.id} [{self.profile.name}] on {self.device_id} ({self.status})"
+
+    @property
+    def device(self):
+        return self.registered_device
+
+    @device.setter
+    def device(self, value):
+        self.registered_device = value
+        if value and hasattr(value, "device_id"):
+            self.device_id = value.device_id
 
     def is_active_and_valid(self) -> bool:
         return self.status == ExecutionLeaseStatus.ACTIVE and timezone.now() < self.expires_at

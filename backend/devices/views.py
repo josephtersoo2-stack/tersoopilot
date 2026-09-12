@@ -6,6 +6,8 @@ from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, viewsets
+from rest_framework.permissions import IsAuthenticated
+from django.utils import timezone
 from .models import SavedProfile, GlobalSetting
 from core.permissions import AdminWritePermission, visible_profiles
 from django.core.exceptions import ValidationError
@@ -230,4 +232,90 @@ class ProfileCookieImportView(APIView):
             "profile_name": profile.name,
             "imported_count": profile.cookie_count
         }, status=status.HTTP_200_OK)
+
+
+class DeviceRegisterView(APIView):
+    """
+    Registers or updates mobile or desktop automation nodes.
+    POST /api/devices/register/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .models import Device, DeviceStatus
+        from .serializers import DeviceSerializer, DeviceRegisterRequestSerializer
+        serializer = DeviceRegisterRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        now = timezone.now()
+        device_id = data["device_id"].strip()
+
+        device, _ = Device.objects.update_or_create(
+            device_id=device_id,
+            defaults={
+                "owner": request.user,
+                "device_sync_id": data.get("device_sync_id", ""),
+                "platform": data.get("platform", "ANDROID"),
+                "brand": data.get("brand", ""),
+                "model_name": data.get("model_name", ""),
+                "app_version": data.get("app_version", ""),
+                "metadata": data.get("metadata", {}),
+                "status": DeviceStatus.ONLINE,
+                "last_seen": now,
+            }
+        )
+
+        return Response(DeviceSerializer(device).data, status=status.HTTP_200_OK)
+
+
+class DeviceHeartbeatView(APIView):
+    """
+    Periodic ping from mobile runner to maintain online status and update telemetry.
+    POST /api/devices/heartbeat/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .models import Device, DeviceStatus
+        device_id = (request.data.get("device_id") or "").strip()
+        if not device_id:
+            return Response({"error": "device_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        now = timezone.now()
+        device = Device.objects.filter(device_id=device_id).first()
+        if not device:
+            device = Device.objects.create(
+                owner=request.user,
+                device_id=device_id,
+                status=DeviceStatus.ONLINE,
+                last_seen=now,
+            )
+        else:
+            device.last_seen = now
+            if device.status == DeviceStatus.OFFLINE:
+                device.status = DeviceStatus.ONLINE
+            device.save(update_fields=["last_seen", "status", "updated_at"])
+
+        return Response({
+            "status": "ALIVE",
+            "device_id": device.device_id,
+            "device_status": device.status,
+            "last_seen": device.last_seen.isoformat()
+        }, status=status.HTTP_200_OK)
+
+
+class DeviceViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Inspects registered nodes across the device fleet.
+    GET /api/devices/registry/
+    """
+    from .serializers import DeviceSerializer
+    serializer_class = DeviceSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        from .models import Device
+        return Device.objects.filter(owner=self.request.user).order_by("-last_seen")
 

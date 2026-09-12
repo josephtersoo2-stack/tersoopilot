@@ -1,6 +1,7 @@
 import uuid
 import json
 from django.db import models
+from django.utils import timezone
 from django.contrib.auth.models import User
 from .security import SecretManager
 
@@ -195,6 +196,46 @@ class BrowserStorage(models.Model):
     def __str__(self):
         return f"Storage [{self.profile.name}: {self.cookie_count} cookies]"
 
+
+class DeviceStatus(models.TextChoices):
+    ONLINE = "ONLINE", "Online"
+    BUSY = "BUSY", "Busy"
+    OFFLINE = "OFFLINE", "Offline"
+
+
+class Device(models.Model):
+    """
+    Represents a physical or emulated mobile/desktop node executing automation jobs.
+    Tracks hardware identity, runtime version, heartbeat, and operational status.
+    """
+    DeviceStatus = DeviceStatus
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="registered_devices", null=True, blank=True)
+    device_id = models.CharField(max_length=255, unique=True, db_index=True)
+    device_sync_id = models.CharField(max_length=100, blank=True, default="", db_index=True)
+    platform = models.CharField(max_length=50, default="ANDROID")
+    brand = models.CharField(max_length=100, blank=True, default="")
+    model_name = models.CharField(max_length=150, blank=True, default="")
+    app_version = models.CharField(max_length=50, blank=True, default="")
+    status = models.CharField(max_length=30, choices=DeviceStatus.choices, default=DeviceStatus.ONLINE, db_index=True)
+    last_seen = models.DateTimeField(default=timezone.now, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-last_seen"]
+        indexes = [
+            models.Index(fields=["owner", "status"]),
+            models.Index(fields=["device_id", "status"]),
+        ]
+
+    def __str__(self):
+        return f"Device {self.device_id} [{self.platform}] - {self.status}"
+
+    def is_online(self, timeout_seconds: int = 120) -> bool:
+        return (timezone.now() - self.last_seen).total_seconds() < timeout_seconds
 
 
 class LLMConfig(models.Model):

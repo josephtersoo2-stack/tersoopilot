@@ -50,6 +50,9 @@ class ExecutionLeaseTests(TestCase):
         lease = ExecutionLease.objects.get(id=data["id"])
         self.assertEqual(lease.profile, self.profile)
         self.assertEqual(lease.status, ExecutionLeaseStatus.ACTIVE)
+        self.assertIsNotNone(lease.device)
+        self.assertEqual(lease.device.device_id, "android_pixel_8_pro")
+        self.assertEqual(lease.device.status, "BUSY")
 
     def test_duplicate_lease_prevention_conflict(self):
         # Device A acquires lease

@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django import forms
-from .models import SavedProfile, LLMConfig, GlobalSetting
+from .models import SavedProfile, LLMConfig, GlobalSetting, Device
 
 class GlobalSettingAdminForm(forms.ModelForm):
     class Meta:
@@ -111,3 +111,11 @@ class LLMConfigAdmin(admin.ModelAdmin):
     @admin.display(boolean=True, description="Custom Prompt Set")
     def has_custom_prompt(self, obj):
         return bool(obj.system_prompt.strip())
+
+
+@admin.register(Device)
+class DeviceAdmin(admin.ModelAdmin):
+    list_display = ("device_id", "owner", "platform", "brand", "model_name", "status", "last_seen", "created_at")
+    list_filter = ("platform", "status", "created_at")
+    search_fields = ("device_id", "device_sync_id", "brand", "model_name", "owner__username")
+    readonly_fields = ("id", "created_at", "updated_at")

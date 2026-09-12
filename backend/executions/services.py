@@ -53,6 +53,24 @@ class LeaseService:
             status=ExecutionLeaseStatus.ACTIVE
         )
 
+        # Resolve or register device entity
+        device_obj = None
+        try:
+            from devices.models import Device, DeviceStatus
+            device_obj, _ = Device.objects.get_or_create(
+                device_id=device_id,
+                defaults={
+                    "owner": user if user and user.is_authenticated else None,
+                    "status": DeviceStatus.BUSY,
+                    "last_seen": now
+                }
+            )
+            device_obj.last_seen = now
+            device_obj.status = DeviceStatus.BUSY
+            device_obj.save(update_fields=["last_seen", "status", "updated_at"])
+        except Exception as e:
+            logger.debug(f"Device resolution bypassed: {e}")
+
         for lease in active_leases:
             # Check if expired
             if now >= lease.expires_at:
@@ -63,7 +81,11 @@ class LeaseService:
                 # Same device re-acquiring or renewing
                 lease.heartbeat_at = now
                 lease.expires_at = now + datetime.timedelta(seconds=duration_seconds)
-                lease.save(update_fields=["heartbeat_at", "expires_at", "updated_at"])
+                update_fields = ["heartbeat_at", "expires_at", "updated_at"]
+                if device_obj and not lease.registered_device:
+                    lease.registered_device = device_obj
+                    update_fields.append("registered_device")
+                lease.save(update_fields=update_fields)
                 logger.info(f"Renewed execution lease {lease.id} for device {device_id}")
                 return lease, None
             else:
@@ -79,6 +101,7 @@ class LeaseService:
         # No active lease exists: create new lease
         new_lease = ExecutionLease.objects.create(
             profile=profile,
+            registered_device=device_obj,
             device_id=device_id,
             status=ExecutionLeaseStatus.ACTIVE,
             heartbeat_at=now,
@@ -124,6 +147,9 @@ class LeaseService:
         lease.heartbeat_at = now
         lease.expires_at = now + datetime.timedelta(seconds=extension_seconds)
         lease.save(update_fields=["heartbeat_at", "expires_at", "updated_at"])
+        if lease.device:
+            lease.device.last_seen = now
+            lease.device.save(update_fields=["last_seen", "updated_at"])
         return lease, None
 
     @classmethod
@@ -152,6 +178,16 @@ class LeaseService:
         lease.status = ExecutionLeaseStatus.RELEASED
         lease.save(update_fields=["status", "updated_at"])
         logger.info(f"Released execution lease {lease.id} for device {device_id}")
+        if lease.registered_device:
+            from devices.models import DeviceStatus
+            other_active = ExecutionLease.objects.filter(
+                registered_device=lease.registered_device,
+                status=ExecutionLeaseStatus.ACTIVE,
+                expires_at__gt=timezone.now()
+            ).exclude(id=lease.id).exists()
+            if not other_active:
+                lease.registered_device.status = DeviceStatus.ONLINE
+                lease.registered_device.save(update_fields=["status", "updated_at"])
         return True, None
 
     @classmethod

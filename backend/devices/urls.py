@@ -8,12 +8,16 @@ from .views import (
     GlobalSettingView,
     ProfileCookieExportView,
     ProfileCookieImportView,
+    DeviceRegisterView,
+    DeviceHeartbeatView,
+    DeviceViewSet,
 )
 from .auth_views import RegisterView, LoginView, UserMeView, LogoutView
 from .sync_views import SyncPushView, SyncPullView, AutoSaveSessionView
 
 router = DefaultRouter()
 router.register(r"profiles", SavedProfileViewSet, basename="saved-profile")
+router.register(r"devices/registry", DeviceViewSet, basename="device-registry")
 
 urlpatterns = [
     # Auth endpoints
@@ -31,6 +35,10 @@ urlpatterns = [
     # Cookie Import/Export endpoints
     path("profiles/<str:profile_id>/cookies/export/", ProfileCookieExportView.as_view(), name="cookie-export"),
     path("profiles/<str:profile_id>/cookies/import/", ProfileCookieImportView.as_view(), name="cookie-import"),
+
+    # Device Registration & Heartbeat endpoints
+    path("devices/register/", DeviceRegisterView.as_view(), name="device-register"),
+    path("devices/heartbeat/", DeviceHeartbeatView.as_view(), name="device-heartbeat"),
 
     # Global settings and devices
     path("settings/global/", GlobalSettingView.as_view(), name="global-settings"),
