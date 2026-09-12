@@ -147,8 +147,16 @@ class TaskExecutionQueueQuerySet(models.QuerySet):
 
 class TaskExecutionQueue(models.Model):
     """
-    Dedicated dispatch queue connecting tasks, profiles, and their canonical Execution.
-    Maintains full backwards compatibility with legacy properties and manager filters.
+    Dedicated dispatch queue connecting tasks, profiles, and their canonical Execution (executions.Execution).
+    
+    Architecture Note:
+    - This model functions as an operational dispatch queue and backward-compatibility adapter for legacy
+      code, serializers, and routes that interact with TaskExecutionQueue.
+    - The canonical entity for execution state, leasing, time-series events, and audit trails is
+      `executions.models.Execution`.
+    - Mutating properties and status checks delegate directly to the underlying `Execution` record,
+      while `executions.models.ExecutionEvent` serves as the single source of truth for runtime events
+      and SSE telemetry.
     """
     ExecutionStatus = ExecutionStatus
 

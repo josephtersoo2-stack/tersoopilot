@@ -421,6 +421,50 @@ class ExecutionServiceTests(TestCase):
         event = ExecutionEvent.objects.filter(execution_id=self.job.id, event_type=ExecutionEventType.STALLED).first()
         self.assertIsNotNone(event)
 
+    def test_diagnostic_logs_are_capped_to_max(self):
+        from .services import ExecutionService, MAX_DIAGNOSTIC_LOG_ENTRIES
+        from .models import ExecutionEvent
+        # Setup a looping DAG so transitions don't terminate prematurely
+        looping_dag = {
+            "entry_state": "step_a",
+            "states": {
+                "step_a": {
+                    "command": "WAIT",
+                    "params": {"seconds": 1},
+                    "transitions": {"SUCCESS": "step_b", "FAILURE": "exit"}
+                },
+                "step_b": {
+                    "command": "WAIT",
+                    "params": {"seconds": 1},
+                    "transitions": {"SUCCESS": "step_a", "FAILURE": "exit"}
+                },
+                "exit": {
+                    "command": "TERMINATE",
+                    "params": {},
+                    "transitions": {}
+                }
+            }
+        }
+        self.job.compiled_dag = looping_dag
+        self.job.entry_state_id = "step_a"
+        self.job.current_state_id = "step_a"
+        self.job.save()
+
+        # Simulate 40 transitions
+        for i in range(40):
+            ExecutionService.transition_state(
+                job=self.job,
+                outcome="SUCCESS",
+                transition_id=f"cap-{i}"
+            )
+
+        self.job.refresh_from_db()
+        self.assertEqual(len(self.job.logs), MAX_DIAGNOSTIC_LOG_ENTRIES)
+        self.assertLessEqual(len(self.job.logs), MAX_DIAGNOSTIC_LOG_ENTRIES)
+        # All events should still exist in ExecutionEvent (source of truth)
+        event_count = ExecutionEvent.objects.filter(execution_id=self.job.id).count()
+        self.assertEqual(event_count, 40)
+
 
 class ExecutionApiTests(TestCase):
     def setUp(self):
@@ -453,3 +497,22 @@ class ExecutionApiTests(TestCase):
         response = self.client.post("/api/executions/reap-stalled/", {"timeout_seconds": 30}, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("reaped_count", response.json())
+
+    def test_stream_telemetry_endpoint(self):
+        from .services import ExecutionService
+        from .models import ExecutionEventType
+        ExecutionService.record_event(self.job.id, ExecutionEventType.RUN_STARTED, {"step": 1})
+
+        # Test canonical /api/executions/{id}/stream/ route
+        response = self.client.get(f"/api/executions/{self.job.id}/stream/?once=true")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response["Content-Type"], "text/event-stream")
+        content = b"".join(response.streaming_content).decode("utf-8")
+        self.assertIn("RUN_STARTED", content)
+
+        # Test legacy /api/automation/ghostpilot/{id}/stream/ route
+        legacy_response = self.client.get(f"/api/automation/ghostpilot/{self.job.id}/stream/?once=true")
+        self.assertEqual(legacy_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(legacy_response["Content-Type"], "text/event-stream")
+        legacy_content = b"".join(legacy_response.streaming_content).decode("utf-8")
+        self.assertIn("RUN_STARTED", legacy_content)

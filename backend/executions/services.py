@@ -183,12 +183,16 @@ class LeaseService:
         return {"is_leased": False, "status": "AVAILABLE"}
 
 
+MAX_DIAGNOSTIC_LOG_ENTRIES = 30
+
+
 class ExecutionService:
     """
     Core execution orchestration service.
     Decouples state-machine transitions, lifecycle heartbeats, and audit event emission
     from REST views into a modular, reusable domain service operating directly on Execution.
     """
+    MAX_DIAGNOSTIC_LOG_ENTRIES = MAX_DIAGNOSTIC_LOG_ENTRIES
 
     @classmethod
     def record_event(cls, execution, event_type: str, payload: dict = None) -> ExecutionEvent:
@@ -318,7 +322,7 @@ class ExecutionService:
             job.execution_context = {}
         job.execution_context.update(context_update)
 
-        # Update logs
+        # Update logs (capped diagnostic cache)
         if not isinstance(job.logs, list):
             job.logs = []
         log_entry = {
@@ -329,6 +333,8 @@ class ExecutionService:
             "timestamp": timezone.now().isoformat()
         }
         job.logs.append(log_entry)
+        if len(job.logs) > cls.MAX_DIAGNOSTIC_LOG_ENTRIES:
+            job.logs = job.logs[-cls.MAX_DIAGNOSTIC_LOG_ENTRIES:]
 
         from_state = job.current_state_id
         job.current_state_id = next_state_id
@@ -463,6 +469,8 @@ class ExecutionService:
             "message": reason,
             "timestamp": now.isoformat()
         })
+        if len(job.logs) > cls.MAX_DIAGNOSTIC_LOG_ENTRIES:
+            job.logs = job.logs[-cls.MAX_DIAGNOSTIC_LOG_ENTRIES:]
         job.save()
 
         # Release associated leases
@@ -530,3 +538,86 @@ class ExecutionService:
                 reaped_count += 1
 
         return reaped_count
+
+    @classmethod
+    def stream_events(cls, execution_id, once: bool = False, max_ticks: int = 30):
+        """
+        Yields Server-Sent Events (SSE) telemetry data for React dashboards and mobile runners.
+        Streams ExecutionEvent audit records and in-flight logs.
+        """
+        import time
+        import json
+
+        try:
+            job = Execution.objects.get(id=execution_id)
+        except (Execution.DoesNotExist, ValueError):
+            return
+
+        emitted_signatures = set()
+
+        def serialize_and_yield(entry):
+            serialized = json.dumps(entry)
+            sig = hash(serialized)
+            if sig not in emitted_signatures:
+                emitted_signatures.add(sig)
+                return f"data: {serialized}\n\n"
+            return None
+
+        # 1. Initial burst: stream existing logs and events
+        for entry in (job.logs if isinstance(job.logs, list) else []):
+            line = serialize_and_yield(entry)
+            if line:
+                yield line
+
+        events = ExecutionEvent.objects.filter(execution_id=job.id).order_by("created_at")
+        for ev in events:
+            ev_data = {
+                "event_type": ev.event_type,
+                "payload": ev.payload,
+                "created_at": ev.created_at.isoformat()
+            }
+            line = serialize_and_yield(ev_data)
+            if line:
+                yield line
+
+        if once or job.status in [ExecutionStatus.SUCCESS, ExecutionStatus.FAILED]:
+            if job.status in [ExecutionStatus.SUCCESS, ExecutionStatus.FAILED]:
+                yield f"data: {json.dumps({'type': 'STATUS', 'status': job.status})}\n\n"
+            return
+
+        # 2. Live polling loop
+        ticks = 0
+        last_event_time = timezone.now()
+        while ticks < max_ticks:
+            time.sleep(1)
+            ticks += 1
+            try:
+                job.refresh_from_db()
+            except Exception:
+                break
+
+            # Check new logs
+            for entry in (job.logs if isinstance(job.logs, list) else []):
+                line = serialize_and_yield(entry)
+                if line:
+                    yield line
+
+            # Check new ExecutionEvents
+            new_events = ExecutionEvent.objects.filter(
+                execution_id=job.id,
+                created_at__gte=last_event_time
+            ).order_by("created_at")
+            for ev in new_events:
+                ev_data = {
+                    "event_type": ev.event_type,
+                    "payload": ev.payload,
+                    "created_at": ev.created_at.isoformat()
+                }
+                line = serialize_and_yield(ev_data)
+                if line:
+                    yield line
+            last_event_time = timezone.now()
+
+            if job.status in [ExecutionStatus.SUCCESS, ExecutionStatus.FAILED]:
+                yield f"data: {json.dumps({'type': 'STATUS', 'status': job.status})}\n\n"
+                break
