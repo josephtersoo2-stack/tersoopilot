@@ -9,6 +9,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.permissions import IsAuthenticated, AllowAny
 
 class RegisterView(APIView):
+    authentication_classes = []
     permission_classes = [AllowAny]
     throttle_scope = "auth"
 
@@ -61,6 +62,7 @@ class RegisterView(APIView):
 
 
 class LoginView(APIView):
+    authentication_classes = []
     permission_classes = [AllowAny]
     throttle_scope = "auth"
 

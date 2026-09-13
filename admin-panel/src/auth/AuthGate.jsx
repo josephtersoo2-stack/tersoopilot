@@ -38,7 +38,7 @@ export default function AuthGate() {
       await verify();
     } catch (err) {
       sessionStorage.removeItem('terso_token');
-      setError(err.response?.data?.error || err.message);
+      setError(err.response?.data?.error || err.response?.data?.detail || err.message);
     } finally { setBusy(false); }
   };
 

@@ -172,7 +172,7 @@ export default function Sidebar({
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
               API Server
             </span>
-            <span className="text-[10px] text-emerald-400 font-mono font-medium">127.0.0.1:8000</span>
+            <span className="text-[10px] text-emerald-400 font-mono font-medium">127.0.0.1:8001</span>
           </div>
 
           <div className="flex items-center justify-between text-[10px] text-neutral-400 pt-1.5 border-t border-[#1E2638]/60">

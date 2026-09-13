@@ -7,7 +7,7 @@ forcing the client to re-authenticate.
 from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
-from rest_framework.authentication import TokenAuthentication
+from rest_framework.authentication import TokenAuthentication, SessionAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
 
@@ -25,3 +25,13 @@ class ExpiringTokenAuthentication(TokenAuthentication):
             token.delete()
             raise AuthenticationFailed("Token has expired. Please log in again.")
         return user, token
+
+
+class CsrfExemptSessionAuthentication(SessionAuthentication):
+    """
+    Session authentication that skips CSRF enforcement for REST API clients.
+    """
+
+    def enforce_csrf(self, request):
+        return  # Bypasses CSRF check for API endpoints while keeping session authentication
+
