@@ -3,7 +3,6 @@ package com.multibrowser.antidetect.automation
 import android.content.Context
 import android.util.Log
 import android.view.View
-import com.multibrowser.antidetect.MainActivity
 import com.multibrowser.antidetect.automation.input.NativeInputAdapter
 import com.multibrowser.antidetect.data.db.AppDatabase
 import com.multibrowser.antidetect.data.model.ProfileEntity
@@ -22,15 +21,15 @@ data class WorkerExecutionContext(
     val geckoSession: GeckoSession,
     val targetView: GeckoView,
     val inputController: NativeInputAdapter,
-    val runner: GhostPilotRunner,
-    val isExternalView: Boolean
+    val runner: GhostPilotRunner
 )
 
 /**
  * Bridges server-selected profile_id to local Room ProfileEntity, sandboxed GeckoSession,
  * attached GeckoView, NativeInputAdapter, and GhostPilotRunner.
  *
- * Implements Phase 2 of the Remediation Implementation Plan.
+ * Implements Phase 2 of the Remediation Implementation Plan:
+ * Autonomous worker execution with strict profile resolution and zero Activity coupling.
  */
 class WorkerProfileSessionManager(
     private val context: Context,
@@ -44,7 +43,7 @@ class WorkerProfileSessionManager(
         profileName: String = "",
         deviceId: String = ""
     ): WorkerExecutionContext = withContext(Dispatchers.Main) {
-        // 1. Resolve local ProfileEntity from Room database
+        // 1. Resolve local ProfileEntity from Room database (strict, no random profile fallback)
         val profile = resolveProfile(profileId, profileName)
             ?: throw IllegalStateException("Profile '$profileId' ($profileName) could not be resolved locally.")
 
@@ -54,24 +53,17 @@ class WorkerProfileSessionManager(
         val session = sessionPoolManager.getOrLaunchSession(profile, forceMute = true)
             ?: throw IllegalStateException("Failed to launch GeckoSession for profile ${profile.id}")
 
-        // 3. Obtain or instantiate GeckoView
-        val activeWindowView = MainActivity.activeGeckoViewInstance
-        val (geckoView, isExternal) = if (activeWindowView != null && activeWindowView.isAttachedToWindow) {
-            Log.i(TAG, "Reusing active foreground GeckoView from MainActivity.")
-            Pair(activeWindowView, true)
-        } else {
-            Log.i(TAG, "Creating dedicated worker GeckoView on main thread.")
-            val view = GeckoView(context)
-            val metrics = context.resources.displayMetrics
-            val width = if (profile.screenWidth > 0) profile.screenWidth else metrics.widthPixels
-            val height = if (profile.screenHeight > 0) profile.screenHeight else metrics.heightPixels
-            view.measure(
-                View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
-            )
-            view.layout(0, 0, width, height)
-            Pair(view, false)
-        }
+        // 3. Instantiate dedicated worker GeckoView on main thread (autonomous - zero Activity coupling)
+        Log.i(TAG, "Creating dedicated worker GeckoView on main thread.")
+        val geckoView = GeckoView(context)
+        val metrics = context.resources.displayMetrics
+        val width = if (profile.screenWidth > 0) profile.screenWidth else metrics.widthPixels
+        val height = if (profile.screenHeight > 0) profile.screenHeight else metrics.heightPixels
+        geckoView.measure(
+            View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(height, View.MeasureSpec.EXACTLY)
+        )
+        geckoView.layout(0, 0, width, height)
 
         sessionPoolManager.attachToView(geckoView, profile.id)
 
@@ -87,7 +79,7 @@ class WorkerProfileSessionManager(
             targetView = geckoView,
             inputController = inputAdapter,
             profileName = profile.name,
-            cloudSyncId = profile.cloudSyncId ?: "",
+            cloudSyncId = profile.cloudSyncId,
             deviceId = deviceId
         )
 
@@ -96,30 +88,33 @@ class WorkerProfileSessionManager(
             geckoSession = session,
             targetView = geckoView,
             inputController = inputAdapter,
-            runner = runner,
-            isExternalView = isExternal
+            runner = runner
         )
     }
 
-    private suspend fun resolveProfile(profileId: String, profileName: String): ProfileEntity? {
-        // Direct ID match
+    internal suspend fun resolveProfile(profileId: String, profileName: String = ""): ProfileEntity? {
+        // 1. Direct ID match
         val byId = db.dao.getProfileById(profileId)
         if (byId != null) return byId
 
-        // Search in all profiles snapshot by ID, cloudSyncId, or name
+        // 2. Search in all profiles snapshot by ID, cloudSyncId, or name
         val allProfiles = db.dao.getAllProfiles().firstOrNull() ?: emptyList()
         return allProfiles.firstOrNull { it.id == profileId }
-            ?: allProfiles.firstOrNull { !it.cloudSyncId.isNullOrBlank() && it.cloudSyncId == profileId }
-            ?: (if (profileName.isNotBlank()) allProfiles.firstOrNull { it.name.equals(profileName, ignoreCase = true) } else null)
-            ?: allProfiles.firstOrNull()
+            ?: allProfiles.firstOrNull {
+                !it.cloudSyncId.isNullOrBlank() && it.cloudSyncId == profileId
+            } ?: if (profileName.isNotBlank()) {
+                allProfiles.firstOrNull {
+                    it.name.equals(profileName, ignoreCase = true)
+                }
+            } else {
+                null
+            }
     }
 
     suspend fun cleanup(context: WorkerExecutionContext) = withContext(Dispatchers.Main) {
         try {
             context.runner.stop()
-            if (!context.isExternalView) {
-                sessionPoolManager.closeSession(context.profile.id, context.targetView)
-            }
+            sessionPoolManager.closeSession(context.profile.id, context.targetView)
             Log.i(TAG, "Successfully cleaned up worker session for profile ${context.profile.id}")
         } catch (e: Exception) {
             Log.w(TAG, "Error cleaning up worker session for ${context.profile.id}: ${e.message}")
