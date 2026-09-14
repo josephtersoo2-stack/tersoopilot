@@ -66,7 +66,7 @@ class GeckoProfileEngine(private val context: Context) {
                 .consoleOutput(false)
                 .build()
 
-            val newRuntime = GeckoRuntime.create(context, runtimeSettings)
+            val newRuntime = GeckoRuntimeHolder.getOrCreate(context) { runtimeSettings }
             installExtensionBridge(newRuntime, profile)
             newRuntime
         }
@@ -141,13 +141,8 @@ class GeckoProfileEngine(private val context: Context) {
         nativePorts.remove(profileId)
         activeProfiles.remove(profileId)
 
-        runtimes.remove(profileId)?.let { rt ->
-            try {
-                rt.shutdown()
-                Log.i(TAG, "GeckoRuntime for profile $profileId successfully shut down")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error shutting down GeckoRuntime for $profileId: ${e.message}", e)
-            }
+        runtimes.remove(profileId)?.let { _ ->
+            Log.i(TAG, "Profile $profileId sessions released")
         }
     }
 

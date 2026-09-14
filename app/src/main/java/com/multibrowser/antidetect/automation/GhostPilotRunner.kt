@@ -218,17 +218,20 @@ class GhostPilotRunner(
                     break
                 }
 
+                val state = currentStateId
+                if (state == null || currentJobId == null) break
+
                 val states = currentDag?.getAsJsonObject("states")
-                val currentNode = states?.getAsJsonObject(currentStateId)
+                val currentNode = states?.getAsJsonObject(state)
 
                 if (currentNode == null) {
-                    if (currentStateId == "exit" || currentStateId == "TERMINAL_SUCCESS") {
+                    if (state == "exit" || state == "TERMINAL_SUCCESS") {
                         lastTerminalState = "COMPLETED"
                     } else {
-                        Log.e(TAG, "Node $currentStateId not found in DAG. Marking failure.")
-                        handleTransition("FAILURE", error = "Node $currentStateId missing from DAG.")
+                        Log.e(TAG, "Node $state not found in DAG. Marking failure.")
+                        handleTransition("FAILURE", error = "Node $state missing from DAG.")
                         lastTerminalState = "FAILED"
-                        executionError = "Node $currentStateId missing from DAG."
+                        executionError = "Node $state missing from DAG."
                     }
                     break
                 }
@@ -237,17 +240,17 @@ class GhostPilotRunner(
 
                 // Persist execution checkpoint before running the physical action
                 saveCheckpoint(
-                    stateId = currentStateId!!,
+                    stateId = state,
                     stepIndex = executedSteps,
                     lastCommand = command,
                     checkpointVersion = currentCheckpointVersion
                 )
 
                 val params = currentNode.getAsJsonObject("params") ?: JsonObject()
-                Log.i(TAG, "Executing step: [$currentStateId] -> Command: $command (step #$executedSteps)")
+                Log.i(TAG, "Executing step: [$state] -> Command: $command (step #$executedSteps)")
 
                 // Action Idempotency Check
-                val actionId = "${execution.executionId}:$currentStateId:$executedSteps"
+                val actionId = "${execution.executionId}:$state:$executedSteps"
                 val cachedOutcome = db.dao.getActionOutcome(actionId)
 
                 val outcome = if (cachedOutcome != null) {
@@ -259,7 +262,7 @@ class GhostPilotRunner(
                         ActionExecutionEntity(
                             actionId = actionId,
                             jobId = execution.executionId,
-                            stateId = currentStateId!!,
+                            stateId = state,
                             command = command,
                             outcome = result,
                             executedAt = System.currentTimeMillis()

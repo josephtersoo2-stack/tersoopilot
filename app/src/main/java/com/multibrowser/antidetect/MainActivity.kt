@@ -79,8 +79,32 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var db: AppDatabase
     private lateinit var engine: GeckoProfileEngine
-    private lateinit var browserCoordinator: BrowserCoordinator
+    lateinit var browserCoordinator: BrowserCoordinator
     private val automationCoordinator = AutomationCoordinator()
+
+    fun launchProfileInForeground(profile: ProfileEntity) {
+        lifecycleScope.launch(Dispatchers.Main) {
+            browserCoordinator.startProfile(profile, openForeground = true)
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAutorunIntent(intent)
+    }
+
+    private fun handleAutorunIntent(intent: android.content.Intent?) {
+        val autorunProfileId = intent?.getStringExtra("AUTORUN_PROFILE_ID")
+        if (!autorunProfileId.isNullOrBlank()) {
+            lifecycleScope.launch(Dispatchers.Main) {
+                val profile = db.dao.getProfileById(autorunProfileId)
+                if (profile != null) {
+                    launchProfileInForeground(profile)
+                }
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -94,6 +118,8 @@ class MainActivity : ComponentActivity() {
         if (AuthManager.isLoggedIn.value) {
             com.multibrowser.antidetect.automation.AutomationWorkerService.start(this)
         }
+
+        handleAutorunIntent(intent)
 
         setContent {
             OctoTheme {
@@ -164,6 +190,21 @@ class MainActivity : ComponentActivity() {
 
         val sessionMuteStates = browserCoordinator.sessionMuteStates
         val currentAudioOwnerId = browserCoordinator.currentAudioOwnerId
+
+        LaunchedEffect(foregroundProfileId) {
+            if (foregroundProfileId != null) {
+                showCreateSheet = false
+                profileToEdit = null
+                showTabsSheet = false
+                showActiveSheet = false
+                showProfileSwitcherSheet = false
+                showBrowserMenuSheet = false
+                showBookmarksSheet = false
+                showHistorySheet = false
+                showAuthDialog = false
+                showAccountMenuDialog = false
+            }
+        }
 
         var activeGeckoView by remember { mutableStateOf<GeckoView?>(null) }
 

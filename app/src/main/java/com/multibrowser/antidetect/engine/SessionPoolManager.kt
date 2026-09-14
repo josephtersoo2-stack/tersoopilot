@@ -119,12 +119,12 @@ class SessionPoolManager(private val context: Context) {
         val configFile = File(profileDir, "geckoview-config.yaml")
         generateConfig(configFile, forceMute, profile)
 
-        // 3. Create Sandboxed Runtime
+        // 3. Obtain or Create Sandboxed Runtime
         val runtimeSettings = GeckoRuntimeSettings.Builder()
             .configFilePath(configFile.absolutePath)
             .consoleOutput(false)
             .build()
-        val runtime = GeckoRuntime.create(context, runtimeSettings)
+        val runtime = GeckoRuntimeHolder.getOrCreate(context) { runtimeSettings }
         runtimePool[profile.id] = runtime
 
         // 4. Install Background Extension (Mute + 240p Enforcer + Hardware Spoofing)
@@ -136,6 +136,7 @@ class SessionPoolManager(private val context: Context) {
             .userAgentOverride(profile.userAgent)
             .viewportMode(GeckoSessionSettings.VIEWPORT_MODE_MOBILE)
             .usePrivateMode(false)
+            .contextId(profile.id)
             .build()
 
         val session = GeckoSession(sessionSettings)
