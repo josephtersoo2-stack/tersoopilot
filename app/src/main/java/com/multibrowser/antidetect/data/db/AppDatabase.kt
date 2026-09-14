@@ -101,7 +101,12 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
                 executedSteps INTEGER DEFAULT 0,
                 lastCommand TEXT DEFAULT '',
                 status TEXT DEFAULT 'RUNNING',
-                updatedAt INTEGER DEFAULT 0
+                updatedAt INTEGER DEFAULT 0,
+                planId TEXT DEFAULT '',
+                planVersion TEXT DEFAULT '1',
+                contextVars TEXT DEFAULT '{}',
+                lastTransitionId TEXT DEFAULT '',
+                checkpointVersion INTEGER DEFAULT 0
             )
             """.trimIndent()
         )
@@ -497,6 +502,35 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
 
         // --- Execution Checkpoints ---
 
+        private fun cursorToCheckpoint(c: Cursor): ExecutionCheckpointEntity {
+            fun getStr(col: String, default: String = ""): String {
+                val idx = c.getColumnIndex(col)
+                return if (idx >= 0 && !c.isNull(idx)) c.getString(idx) else default
+            }
+            fun getInt(col: String, default: Int = 0): Int {
+                val idx = c.getColumnIndex(col)
+                return if (idx >= 0 && !c.isNull(idx)) c.getInt(idx) else default
+            }
+            fun getLong(col: String, default: Long = 0L): Long {
+                val idx = c.getColumnIndex(col)
+                return if (idx >= 0 && !c.isNull(idx)) c.getLong(idx) else default
+            }
+            return ExecutionCheckpointEntity(
+                jobId = getStr("jobId"),
+                profileId = getStr("profileId"),
+                currentStateId = getStr("currentStateId"),
+                executedSteps = getInt("executedSteps"),
+                lastCommand = getStr("lastCommand"),
+                status = getStr("status", "RUNNING"),
+                updatedAt = getLong("updatedAt"),
+                planId = getStr("planId"),
+                planVersion = getStr("planVersion", "1"),
+                contextVars = getStr("contextVars", "{}"),
+                lastTransitionId = getStr("lastTransitionId"),
+                checkpointVersion = getInt("checkpointVersion", 0)
+            )
+        }
+
         override suspend fun saveCheckpoint(checkpoint: ExecutionCheckpointEntity) = withContext(Dispatchers.IO) {
             val db = writableDatabase
             val cv = ContentValues().apply {
@@ -507,6 +541,11 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
                 put("lastCommand", checkpoint.lastCommand)
                 put("status", checkpoint.status)
                 put("updatedAt", checkpoint.updatedAt)
+                put("planId", checkpoint.planId)
+                put("planVersion", checkpoint.planVersion)
+                put("contextVars", checkpoint.contextVars)
+                put("lastTransitionId", checkpoint.lastTransitionId)
+                put("checkpointVersion", checkpoint.checkpointVersion)
             }
             db.insertWithOnConflict("execution_checkpoints", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
             Unit
@@ -519,17 +558,7 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
                 arrayOf(jobId)
             )
             cursor.use {
-                if (it.moveToFirst()) {
-                    ExecutionCheckpointEntity(
-                        jobId = it.getString(it.getColumnIndexOrThrow("jobId")),
-                        profileId = it.getString(it.getColumnIndexOrThrow("profileId")),
-                        currentStateId = it.getString(it.getColumnIndexOrThrow("currentStateId")),
-                        executedSteps = it.getInt(it.getColumnIndexOrThrow("executedSteps")),
-                        lastCommand = it.getString(it.getColumnIndexOrThrow("lastCommand")),
-                        status = it.getString(it.getColumnIndexOrThrow("status")),
-                        updatedAt = it.getLong(it.getColumnIndexOrThrow("updatedAt"))
-                    )
-                } else null
+                if (it.moveToFirst()) cursorToCheckpoint(it) else null
             }
         }
 
@@ -540,17 +569,7 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
                 arrayOf(profileId)
             )
             cursor.use {
-                if (it.moveToFirst()) {
-                    ExecutionCheckpointEntity(
-                        jobId = it.getString(it.getColumnIndexOrThrow("jobId")),
-                        profileId = it.getString(it.getColumnIndexOrThrow("profileId")),
-                        currentStateId = it.getString(it.getColumnIndexOrThrow("currentStateId")),
-                        executedSteps = it.getInt(it.getColumnIndexOrThrow("executedSteps")),
-                        lastCommand = it.getString(it.getColumnIndexOrThrow("lastCommand")),
-                        status = it.getString(it.getColumnIndexOrThrow("status")),
-                        updatedAt = it.getLong(it.getColumnIndexOrThrow("updatedAt"))
-                    )
-                } else null
+                if (it.moveToFirst()) cursorToCheckpoint(it) else null
             }
         }
 
@@ -561,17 +580,7 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
                 arrayOf(profileId)
             )
             cursor.use {
-                if (it.moveToFirst()) {
-                    ExecutionCheckpointEntity(
-                        jobId = it.getString(it.getColumnIndexOrThrow("jobId")),
-                        profileId = it.getString(it.getColumnIndexOrThrow("profileId")),
-                        currentStateId = it.getString(it.getColumnIndexOrThrow("currentStateId")),
-                        executedSteps = it.getInt(it.getColumnIndexOrThrow("executedSteps")),
-                        lastCommand = it.getString(it.getColumnIndexOrThrow("lastCommand")),
-                        status = it.getString(it.getColumnIndexOrThrow("status")),
-                        updatedAt = it.getLong(it.getColumnIndexOrThrow("updatedAt"))
-                    )
-                } else null
+                if (it.moveToFirst()) cursorToCheckpoint(it) else null
             }
         }
 
@@ -663,7 +672,7 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
 
     companion object {
         const val DATABASE_NAME = "antidetect_browser.db"
-        const val DATABASE_VERSION = 4
+        const val DATABASE_VERSION = 5
         private const val TAG = "AppDatabase"
 
         private fun safelyAddColumn(db: SQLiteDatabase, table: String, column: String, type: String) {
@@ -729,6 +738,13 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
                     """.trimIndent()
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS idx_action_job ON action_executions(jobId)")
+            },
+            DatabaseMigration(4, 5) { db ->
+                safelyAddColumn(db, "execution_checkpoints", "planId", "TEXT DEFAULT ''")
+                safelyAddColumn(db, "execution_checkpoints", "planVersion", "TEXT DEFAULT '1'")
+                safelyAddColumn(db, "execution_checkpoints", "contextVars", "TEXT DEFAULT '{}'")
+                safelyAddColumn(db, "execution_checkpoints", "lastTransitionId", "TEXT DEFAULT ''")
+                safelyAddColumn(db, "execution_checkpoints", "checkpointVersion", "INTEGER DEFAULT 0")
             }
         )
 

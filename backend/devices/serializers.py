@@ -106,10 +106,12 @@ class DeviceSerializer(serializers.ModelSerializer):
         model = Device
         fields = [
             "id", "owner", "device_id", "device_sync_id", "platform",
-            "brand", "model_name", "app_version", "status", "last_seen",
+            "brand", "model_name", "app_version", "android_version",
+            "geckoview_version", "battery_percent", "screen_width", "screen_height",
+            "capabilities", "status", "last_seen", "last_heartbeat", "current_execution",
             "metadata", "is_online", "created_at", "updated_at"
         ]
-        read_only_fields = ["id", "owner", "last_seen", "created_at", "updated_at"]
+        read_only_fields = ["id", "owner", "last_seen", "last_heartbeat", "created_at", "updated_at"]
 
     def get_is_online(self, obj) -> bool:
         return obj.is_online()
@@ -122,4 +124,18 @@ class DeviceRegisterRequestSerializer(serializers.Serializer):
     brand = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
     model_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
     app_version = serializers.CharField(max_length=50, required=False, allow_blank=True, default="")
+    android_version = serializers.IntegerField(required=False, default=14)
+    geckoview_version = serializers.CharField(max_length=50, required=False, allow_blank=True, default="")
+    battery_percent = serializers.IntegerField(required=False, default=100)
+    screen_width = serializers.IntegerField(required=False, default=384)
+    screen_height = serializers.IntegerField(required=False, default=854)
+    capabilities = serializers.DictField(required=False, default=dict)
     metadata = serializers.DictField(required=False, default=dict)
+
+
+class DeviceHeartbeatRequestSerializer(serializers.Serializer):
+    device_id = serializers.CharField(max_length=255, required=True)
+    battery_percent = serializers.IntegerField(required=False, min_value=0, max_value=100)
+    status = serializers.ChoiceField(choices=Device.DeviceStatus.choices, required=False)
+    capabilities = serializers.DictField(required=False)
+    metadata = serializers.DictField(required=False)

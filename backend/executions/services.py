@@ -187,7 +187,8 @@ class LeaseService:
             ).exclude(id=lease.id).exists()
             if not other_active:
                 lease.registered_device.status = DeviceStatus.ONLINE
-                lease.registered_device.save(update_fields=["status", "updated_at"])
+                lease.registered_device.current_execution = None
+                lease.registered_device.save(update_fields=["status", "current_execution", "updated_at"])
         return True, None
 
     @classmethod
@@ -428,10 +429,19 @@ class ExecutionService:
 
     @classmethod
     @transaction.atomic
-    def heartbeat(cls, job, device_id: str = None) -> dict:
+    def heartbeat(
+        cls,
+        job,
+        device_id: str = None,
+        current_state_id: str = None,
+        checkpoint_version: int = None,
+        battery_percent: int = None,
+        lease_id: str = None
+    ) -> dict:
         """
-        Processes client heartbeat. Updates last_heartbeat timestamp and transitions
-        DISPATCHED -> RUNNING. Also updates lease heartbeat if present.
+        Processes client heartbeat according to Section 22 V2 contract and legacy conventions.
+        Updates last_heartbeat timestamp, last_confirmed_state, and checkpoint_version.
+        Transitions DISPATCHED -> RUNNING. Also updates lease heartbeat and device telemetry.
         """
         if isinstance(job, (str, uuid.UUID)):
             job = Execution.objects.select_for_update().get(id=job)
@@ -442,40 +452,115 @@ class ExecutionService:
 
         now = timezone.now()
 
-        if job.status in [ExecutionStatus.SUCCESS, ExecutionStatus.FAILED]:
+        if job.status == ExecutionStatus.SUCCESS:
             return {
+                "action": "TERMINAL_SUCCESS",
+                "directive": "TERMINAL_SUCCESS",
                 "status": "TERMINAL",
                 "job_id": str(job.id),
                 "current_state": job.current_state_id,
                 "job_status": job.status,
                 "status_code": 200
             }
+        if job.status == ExecutionStatus.FAILED:
+            return {
+                "action": "TERMINAL_FAILURE",
+                "directive": "TERMINAL_FAILURE",
+                "status": "TERMINAL",
+                "job_id": str(job.id),
+                "current_state": job.current_state_id,
+                "job_status": job.status,
+                "status_code": 200
+            }
+        if job.status == ExecutionStatus.CANCELLED:
+            return {
+                "action": "CANCEL",
+                "directive": "CANCEL",
+                "status": "CANCEL",
+                "job_id": str(job.id),
+                "current_state": job.current_state_id,
+                "job_status": job.status,
+                "status_code": 200
+            }
+
+        if device_id:
+            lease_qs = ExecutionLease.objects.filter(
+                profile=job.profile,
+                device_id=device_id,
+                status=ExecutionLeaseStatus.ACTIVE
+            )
+            if lease_id:
+                try:
+                    lease_qs = lease_qs.filter(id=uuid.UUID(str(lease_id)))
+                except (ValueError, TypeError):
+                    pass
+
+            active_lease = lease_qs.first()
+            if not active_lease or active_lease.expires_at <= now:
+                return {
+                    "action": "LEASE_EXPIRED",
+                    "directive": "LEASE_EXPIRED",
+                    "status": "LEASE_EXPIRED",
+                    "job_id": str(job.id),
+                    "current_state": job.current_state_id,
+                    "job_status": job.status,
+                    "status_code": 410
+                }
+
+            # Refresh lease heartbeat
+            active_lease.heartbeat_at = now
+            if (active_lease.expires_at - now).total_seconds() < 30:
+                active_lease.expires_at = now + timezone.timedelta(seconds=60)
+            active_lease.save(update_fields=["heartbeat_at", "expires_at"])
+
+            # Update device telemetry
+            from devices.models import Device
+            device_updates = {"last_heartbeat": now}
+            if battery_percent is not None:
+                try:
+                    device_updates["battery_percent"] = max(0, min(100, int(battery_percent)))
+                except (ValueError, TypeError):
+                    pass
+            Device.objects.filter(device_id=device_id).update(**device_updates)
 
         if job.status == ExecutionStatus.DISPATCHED:
             job.status = ExecutionStatus.RUNNING
+
+        if current_state_id:
+            job.last_confirmed_state = str(current_state_id)
+        if checkpoint_version is not None:
+            try:
+                job.checkpoint_version = int(checkpoint_version)
+            except (ValueError, TypeError):
+                pass
 
         if not isinstance(job.execution_context, dict):
             job.execution_context = {}
         job.execution_context["last_heartbeat"] = now.isoformat()
         job.save()
 
-        if device_id:
-            ExecutionLease.objects.filter(
-                profile=job.profile,
-                device_id=device_id,
-                status=ExecutionLeaseStatus.ACTIVE
-            ).update(heartbeat_at=now)
-
         cls.record_event(
             execution=job,
             event_type=ExecutionEventType.HEARTBEAT,
-            payload={"current_state": job.current_state_id, "timestamp": now.isoformat()}
+            payload={
+                "current_state": job.current_state_id,
+                "last_confirmed_state": job.last_confirmed_state,
+                "checkpoint_version": job.checkpoint_version,
+                "timestamp": now.isoformat()
+            }
         )
 
+        from .models import RecoveryStatus
+        directive = "RESUME_REQUIRED" if (job.recovery_status == RecoveryStatus.PENDING or job.status == ExecutionStatus.STALLED) else "CONTINUE"
+        status_label = "ALIVE" if directive == "CONTINUE" else directive
+
         return {
-            "status": "ALIVE",
+            "action": directive,
+            "directive": directive,
+            "status": status_label,
             "job_id": str(job.id),
             "current_state": job.current_state_id,
+            "checkpoint_version": job.checkpoint_version,
             "job_status": job.status,
             "status_code": 200
         }

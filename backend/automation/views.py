@@ -23,6 +23,9 @@ from .models import (
     AIPromptConfig,
     AssistantSession,
     AssistantMessage,
+    Automation,
+    AutomationRun,
+    AutomationRunStatus,
 )
 from .serializers import (
     NicheSerializer,
@@ -33,6 +36,8 @@ from .serializers import (
     AIPromptConfigSerializer,
     AssistantSessionSerializer,
     AssistantMessageSerializer,
+    AutomationSerializer,
+    AutomationRunSerializer,
 )
 from .compiler import RecipeCompiler
 from .validator import DAGValidator
@@ -328,3 +333,101 @@ class AssistantViewSet(viewsets.ModelViewSet):
             AssistantSessionSerializer(session).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class AutomationViewSet(viewsets.ModelViewSet):
+    """
+    CRUD management for durable automation rules, cadences, targeting, and concurrency limits.
+    """
+    permission_classes = [IsAdminUser]
+    queryset = Automation.objects.all().order_by("-created_at")
+    serializer_class = AutomationSerializer
+
+    @action(detail=True, methods=["post"], url_path="trigger")
+    def trigger_run(self, request, pk=None):
+        """
+        Manually forces an immediate execution run for this automation regardless of schedule.
+        """
+        from .scheduler.service import SchedulerService
+
+        automation = self.get_object()
+        run_key = f"{automation.id}_manual_{int(time.time())}"
+        run = SchedulerService.create_run_if_due(
+            automation=automation,
+            run_key=run_key
+        )
+        if run:
+            return Response(AutomationRunSerializer(run).data, status=status.HTTP_201_CREATED)
+        return Response(
+            {"error": "Unable to trigger run. Check profile eligibility and active leases."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    @action(detail=True, methods=["post"], url_path="run-now")
+    def run_now(self, request, pk=None):
+        """Alias for trigger to match V2 specification POST /api/automation/rules/{id}/run-now/."""
+        return self.trigger_run(request, pk=pk)
+
+    @action(detail=True, methods=["post"], url_path="pause")
+    def pause(self, request, pk=None):
+        """Pauses the automation schedule."""
+        automation = self.get_object()
+        automation.enabled = False
+        automation.save(update_fields=["enabled", "updated_at"])
+        return Response(AutomationSerializer(automation).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="resume")
+    def resume(self, request, pk=None):
+        """Resumes the automation schedule."""
+        automation = self.get_object()
+        automation.enabled = True
+        automation.save(update_fields=["enabled", "updated_at"])
+        return Response(AutomationSerializer(automation).data, status=status.HTTP_200_OK)
+
+
+class AutomationRunViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Audit and lifecycle inspection for campaign execution runs.
+    """
+    permission_classes = [IsAdminUser]
+    queryset = AutomationRun.objects.all().order_by("-created_at")
+    serializer_class = AutomationRunSerializer
+
+    @action(detail=True, methods=["post"], url_path="cancel")
+    def cancel_run(self, request, pk=None):
+        """Cancels a scheduled or running execution run and fails pending executions."""
+        from executions.models import Execution, ExecutionStatus
+
+        run = self.get_object()
+        if run.status in [AutomationRunStatus.COMPLETED, AutomationRunStatus.CANCELLED]:
+            return Response(
+                {"error": f"Cannot cancel run in status '{run.status}'."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        now = timezone.now()
+        with transaction.atomic():
+            run.status = AutomationRunStatus.CANCELLED
+            run.completed_at = now
+            run.save(update_fields=["status", "completed_at", "updated_at"])
+
+            # Cancel pending executions
+            Execution.objects.filter(
+                automation_run=run,
+                status=ExecutionStatus.PENDING
+            ).update(
+                status=ExecutionStatus.FAILED,
+                completed_at=now
+            )
+
+        return Response(AutomationRunSerializer(run).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path="executions")
+    def list_executions(self, request, pk=None):
+        """Returns all executions associated with this execution run."""
+        from executions.serializers import ExecutionSerializer
+
+        run = self.get_object()
+        executions = run.executions.all().order_by("-created_at")
+        return Response(ExecutionSerializer(executions, many=True).data, status=status.HTTP_200_OK)
+

@@ -26,6 +26,10 @@ object CommandRegistry {
         "BÉZIER_SWIPE",
         "YT_SHORTS_SWIPE",
         "WAIT_PLAYBACK",
+        "YT_SCRUB_TIMELINE",
+        "YT_SCROLL_TO_COMMENTS",
+        "YT_DWELL_ON_COMMENTS",
+        "YT_CLICK_UP_NEXT",
         "TIER2_FALLBACK",
         "TERMINATE",
         "COMPLETE"

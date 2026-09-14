@@ -20,6 +20,17 @@ Base path: `/api/`. JSON requests and `Authorization: Token <token>` for authent
 | `automation/niches/` | CRUD | Staff, global catalogue |
 | `automation/tasks/` | CRUD | Staff, reusable templates |
 | `automation/tasks/{id}/dispatch/` | POST | Staff; validates all profile UUIDs before inserting jobs |
+| `automation/rules/` & `automations/` | CRUD | Staff; durable automation schedule definitions |
+| `automation/rules/{id}/run-now/` | POST | Staff; immediate execution run dispatch |
+| `automation/rules/{id}/pause/`, `resume/` | POST | Staff; pause/resume automation schedules |
+| `automation/runs/` | GET | Staff; campaign execution runs and aggregate metrics |
+| `automation/runs/{id}/cancel/` | POST | Staff; cancels active run and pending executions |
+| `automation/runs/{id}/executions/` | GET | Staff; lists all executions linked to a run |
+| `automation/fleet/` | GET | Staff/Owner; worker node registry, battery, specs |
+| `automation/fleet/{id}/disable/`, `enable/` | POST | Staff/Owner; worker node availability management |
+| `automation/ghostpilot/claim-next/` | POST | Device node; atomic pending execution claim with lease |
+| `automation/ghostpilot/heartbeat/` | POST | Device node; lease extension and presence telemetry |
+| `automation/ghostpilot/{id}/resume/` | GET | Device node; returns plan and saved checkpoint |
 | `automation/ghostpilot/` | GET | Owner's jobs or staff fleet-wide |
 | `automation/ghostpilot/poll/{profile_id}/` | GET | Owner/staff; atomic pending-job claim; query route also supported |
 | `automation/ghostpilot/{id}/transition/` | POST | Owner/staff; optional unique `transition_id` for safe retries |

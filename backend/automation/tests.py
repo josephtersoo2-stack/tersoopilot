@@ -1,7 +1,9 @@
 import uuid
 import json
+import datetime
 from unittest.mock import patch, MagicMock
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from django.contrib.auth.models import User
 from rest_framework.test import APIClient
 from rest_framework import status
@@ -13,8 +15,14 @@ from .models import (
     AutomationTask,
     TaskExecutionQueue,
     PlatformCategory,
-    AIPromptConfig
+    AIPromptConfig,
+    Automation,
+    AutomationRun,
+    ScheduleType,
+    SelectionMode,
+    AutomationRunStatus,
 )
+from executions.models import Execution, ExecutionPlan
 from .compiler import RecipeCompiler
 from .decision_engine import (
     AgentRecoveryAction,
@@ -1130,4 +1138,1274 @@ class YouTubeStrategyTests(TestCase):
         self.assertEqual(select_node["params"]["video_format"], "long_form")
 
 
+class AutomationV2DomainModelTests(TestCase):
+    """
+    Verification suite for Phase 1: Domain Models, Run Idempotency, and Plan Versioning.
+    """
+    def setUp(self):
+        self.profile = SavedProfile.objects.create(
+            name="Pixel 8 Automation Worker",
+            brand="Google",
+            model_name="Pixel 8 Pro",
+            model_code="GC3VE",
+            android_version=14,
+            screen_width=412,
+            screen_height=915,
+            user_agent="Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
+        )
+        self.niche = Niche.objects.create(
+            name="Mechanical Keyboards",
+            description="Testing niche targeting"
+        )
+        self.task = AutomationTask.objects.create(
+            name="YouTube Warmup Task",
+            category=PlatformCategory.YOUTUBE,
+            niche=self.niche,
+            config={"min_watch_seconds": 60, "max_watch_seconds": 180}
+        )
+
+    def test_automation_creation_and_defaults(self):
+        """Verify Automation model field defaults and relationships."""
+        automation = Automation.objects.create(
+            name="Daily Morning Warmup",
+            task=self.task,
+            schedule_type=ScheduleType.DAILY,
+            schedule_config={"time": "09:30"},
+            timezone="Africa/Lagos",
+            selection_mode=SelectionMode.NICHE,
+            concurrency_limit=3,
+            cooldown_minutes=45
+        )
+        automation.target_niches.add(self.niche)
+        automation.target_profiles.add(self.profile)
+
+        self.assertEqual(automation.name, "Daily Morning Warmup")
+        self.assertTrue(automation.enabled)
+        self.assertEqual(automation.schedule_type, ScheduleType.DAILY)
+        self.assertEqual(automation.timezone, "Africa/Lagos")
+        self.assertIn(self.niche, automation.target_niches.all())
+        self.assertIn(self.profile, automation.target_profiles.all())
+        self.assertEqual(str(automation), "Daily Morning Warmup [DAILY]")
+
+    def test_automation_run_idempotency(self):
+        """Verify UNIQUE(automation, run_key) prevents duplicate campaign runs."""
+        from django.db import IntegrityError
+
+        automation = Automation.objects.create(
+            name="Idempotent Test",
+            task=self.task,
+            schedule_type=ScheduleType.ONE_TIME
+        )
+        run_key = "test_run_2026_09_13_1000"
+
+        run1 = AutomationRun.objects.create(
+            automation=automation,
+            run_key=run_key,
+            total_target_profiles=1
+        )
+        self.assertEqual(run1.status, AutomationRunStatus.SCHEDULED)
+
+        # Attempting to create duplicate run with same run_key must raise IntegrityError
+        from django.db import transaction
+        with transaction.atomic():
+            with self.assertRaises(IntegrityError):
+                AutomationRun.objects.create(
+                    automation=automation,
+                    run_key=run_key,
+                    total_target_profiles=1
+                )
+
+    def test_execution_plan_versioning_and_immutability(self):
+        """Verify versioned ExecutionPlan guarantees historical DAG immutability."""
+        from django.db import IntegrityError, transaction
+
+        # Plan v1
+        plan_v1 = ExecutionPlan.objects.create(
+            task=self.task,
+            version=1,
+            compiled_dag={"entry_state": "step_1", "states": {"step_1": {"cmd": "GOTO"}}},
+            config_snapshot=self.task.config
+        )
+        self.assertEqual(plan_v1.version, 1)
+
+        # Duplicate version for same task must fail
+        with transaction.atomic():
+            with self.assertRaises(IntegrityError):
+                ExecutionPlan.objects.create(
+                    task=self.task,
+                    version=1,
+                    compiled_dag={"entry_state": "different"}
+                )
+
+        # Execution linked to Plan v1
+        automation = Automation.objects.create(
+            name="Plan Test Auto",
+            task=self.task
+        )
+        run = AutomationRun.objects.create(
+            automation=automation,
+            run_key="run_v1"
+        )
+        exec_record = Execution.objects.create(
+            task=self.task,
+            profile=self.profile,
+            automation_run=run,
+            plan=plan_v1,
+            plan_version="1",
+            recovery_status=Execution.RecoveryStatus.NONE,
+            compiled_dag=plan_v1.compiled_dag
+        )
+
+        # Now mutate task configuration and generate Plan v2
+        self.task.config = {"min_watch_seconds": 300, "max_watch_seconds": 600}
+        self.task.save()
+
+        plan_v2 = ExecutionPlan.objects.create(
+            task=self.task,
+            version=2,
+            compiled_dag={"entry_state": "step_v2", "states": {"step_v2": {"cmd": "SEARCH"}}},
+            config_snapshot=self.task.config
+        )
+
+        # Historical execution must remain unchanged and pointing to Plan v1
+        exec_record.refresh_from_db()
+        self.assertEqual(exec_record.plan.version, 1)
+        self.assertEqual(exec_record.compiled_dag["entry_state"], "step_1")
+        self.assertEqual(plan_v2.version, 2)
+
+
+class AutomationV2SchedulerTests(TestCase):
+    """
+    Validates Phase 2: Deterministic Scheduler, Policies, Eligibility Engine,
+    Job Dispatcher, and Worker Claim API.
+    """
+
+    def setUp(self):
+        self.user = User.objects.create_superuser(
+            username="scheduler_admin",
+            password="adminpassword123",
+            email="admin@terso.test"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        self.niche = Niche.objects.create(
+            name="Tech Reviewers",
+            seed_keywords=["oled monitor", "keychron keyboard"],
+            seed_websites=["https://rtings.com"]
+        )
+
+        self.profile1 = SavedProfile.objects.create(
+            user=self.user,
+            name="Profile Tech 1",
+            brand="Samsung",
+            model_name="S24 Ultra",
+            model_code="SM-S928B",
+            user_agent="Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
+        )
+        ProfileNicheAffiliation.objects.create(
+            profile=self.profile1,
+            niche=self.niche,
+            weight_percentage=100
+        )
+
+        self.profile2 = SavedProfile.objects.create(
+            user=self.user,
+            name="Profile Tech 2",
+            brand="Google",
+            model_name="Pixel 8 Pro",
+            model_code="GC3VE",
+            user_agent="Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
+        )
+        ProfileNicheAffiliation.objects.create(
+            profile=self.profile2,
+            niche=self.niche,
+            weight_percentage=100
+        )
+
+        self.task = AutomationTask.objects.create(
+            name="Daily Niche Warmup",
+            category=PlatformCategory.WARMING,
+            config={"max_actions": 5}
+        )
+
+    def test_schedule_policy_evaluation(self):
+        """Tests schedule window determination for ONE_TIME, DAILY, and INTERVAL schedules."""
+        from django.utils import timezone
+        import datetime
+        from automation.scheduler.policies import is_automation_due
+
+        now = timezone.now()
+
+        # 1. ONE_TIME schedule past due
+        auto_onetime = Automation.objects.create(
+            name="One-Time Task",
+            task=self.task,
+            schedule_type=ScheduleType.ONE_TIME,
+            schedule_config={"run_at": (now - datetime.timedelta(minutes=5)).isoformat()}
+        )
+        is_due, run_key, _ = is_automation_due(auto_onetime, now_dt=now)
+        self.assertTrue(is_due)
+        self.assertEqual(run_key, f"{auto_onetime.id}_onetime")
+
+        # After run created, should no longer be due
+        AutomationRun.objects.create(automation=auto_onetime, run_key=run_key)
+        is_due, _, _ = is_automation_due(auto_onetime, now_dt=now)
+        self.assertFalse(is_due)
+
+        # 2. INTERVAL schedule
+        auto_interval = Automation.objects.create(
+            name="Interval Task",
+            task=self.task,
+            schedule_type=ScheduleType.INTERVAL,
+            schedule_config={"interval_minutes": 30},
+            last_run_at=now - datetime.timedelta(minutes=45)
+        )
+        is_due, run_key, _ = is_automation_due(auto_interval, now_dt=now)
+        self.assertTrue(is_due)
+        self.assertTrue(run_key.startswith(str(auto_interval.id)))
+
+        # Update last_run_at to recent, should NOT be due
+        auto_interval.last_run_at = now - datetime.timedelta(minutes=10)
+        auto_interval.save()
+        is_due, _, _ = is_automation_due(auto_interval, now_dt=now)
+        self.assertFalse(is_due)
+
+    def test_eligibility_engine_filtering(self):
+        """Validates all filtering rules: targeting, active lease conflict, cooldown, already queued."""
+        from django.utils import timezone
+        import datetime
+        from automation.scheduler.planner import EligibilityEngine, EligibilityReason
+        from executions.models import ExecutionLease, ExecutionLeaseStatus, Execution, ExecutionStatus
+
+        now = timezone.now()
+
+        automation = Automation.objects.create(
+            name="Targeted Auto",
+            task=self.task,
+            selection_mode=SelectionMode.NICHE,
+            cooldown_minutes=60
+        )
+        automation.target_niches.add(self.niche)
+
+        # Profile 1 has active lease on another device
+        ExecutionLease.objects.create(
+            profile=self.profile1,
+            device_id="device_conflict",
+            status=ExecutionLeaseStatus.ACTIVE,
+            expires_at=now + datetime.timedelta(minutes=5)
+        )
+
+        results = EligibilityEngine.calculate_eligible_profiles(automation, now_dt=now)
+        eval_map = {r["profile_id"]: r for r in results}
+
+        # Profile 1 must be excluded due to ACTIVE_LEASE_CONFLICT
+        self.assertFalse(eval_map[str(self.profile1.id)]["eligible"])
+        self.assertEqual(eval_map[str(self.profile1.id)]["reason"], EligibilityReason.ACTIVE_LEASE_CONFLICT)
+
+        # Profile 2 has no conflicts -> eligible
+        self.assertTrue(eval_map[str(self.profile2.id)]["eligible"])
+        self.assertEqual(eval_map[str(self.profile2.id)]["reason"], EligibilityReason.OK)
+
+        # Now test Cooldown on Profile 2
+        Execution.objects.create(
+            task=self.task,
+            profile=self.profile2,
+            status=ExecutionStatus.SUCCESS,
+            updated_at=now - datetime.timedelta(minutes=15)
+        )
+        results2 = EligibilityEngine.calculate_eligible_profiles(automation, now_dt=now)
+        eval_map2 = {r["profile_id"]: r for r in results2}
+        self.assertFalse(eval_map2[str(self.profile2.id)]["eligible"])
+        self.assertEqual(eval_map2[str(self.profile2.id)]["reason"], EligibilityReason.COOLDOWN_ACTIVE)
+
+    def test_scheduler_service_mint_and_idempotency(self):
+        """Validates run minting, execution queuing, and run key idempotency."""
+        from django.utils import timezone
+        import datetime
+        from automation.scheduler.service import SchedulerService
+        from executions.models import Execution, ExecutionStatus
+
+        now = timezone.now()
+        automation = Automation.objects.create(
+            name="Batch Run Auto",
+            task=self.task,
+            schedule_type=ScheduleType.ONE_TIME,
+            schedule_config={"run_at": (now - datetime.timedelta(minutes=1)).isoformat()},
+            selection_mode=SelectionMode.NICHE
+        )
+        automation.target_niches.add(self.niche)
+
+        # Evaluate due automations
+        due_runs = SchedulerService.evaluate_due_automations(now_dt=now)
+        self.assertEqual(len(due_runs), 1)
+
+        run = due_runs[0]
+        self.assertEqual(run.status, AutomationRunStatus.SCHEDULED)
+        self.assertEqual(run.total_target_profiles, 2)
+        self.assertEqual(run.queued_count, 2)
+
+        # Executions were created in PENDING state
+        pending_execs = Execution.objects.filter(automation_run=run)
+        self.assertEqual(pending_execs.count(), 2)
+        self.assertTrue(all(e.status == ExecutionStatus.PENDING for e in pending_execs))
+
+        # Re-running evaluate_due_automations must NOT mint duplicate runs or executions
+        due_runs_again = SchedulerService.evaluate_due_automations(now_dt=now)
+        self.assertEqual(len(due_runs_again), 0)
+        self.assertEqual(AutomationRun.objects.filter(automation=automation).count(), 1)
+        self.assertEqual(Execution.objects.filter(automation_run=run).count(), 2)
+
+    def test_job_dispatcher_allocation_and_locking(self):
+        """Validates atomic job allocation, lease acquisition, and event emission."""
+        from django.utils import timezone
+        import datetime
+        from automation.scheduler.service import SchedulerService
+        from automation.scheduler.dispatcher import JobDispatcher
+        from executions.models import Execution, ExecutionStatus, ExecutionLease, ExecutionEvent, ExecutionEventType
+
+        now = timezone.now()
+        automation = Automation.objects.create(
+            name="Dispatch Test Auto",
+            task=self.task,
+            schedule_type=ScheduleType.ONE_TIME,
+            schedule_config={"run_at": (now - datetime.timedelta(seconds=10)).isoformat()},
+            selection_mode=SelectionMode.NICHE,
+            concurrency_limit=5
+        )
+        automation.target_niches.add(self.niche)
+
+        SchedulerService.evaluate_due_automations(now_dt=now)
+
+        # Device A claims next job
+        job_payload = JobDispatcher.allocate_next_execution(device_id="android_device_alpha", user=self.user)
+        self.assertIsNotNone(job_payload)
+        self.assertEqual(job_payload["task_id"], str(self.task.id))
+        self.assertIn("lease_id", job_payload)
+
+        # Verify execution record transitioned to DISPATCHED
+        exec_record = Execution.objects.get(id=job_payload["execution_id"])
+        self.assertEqual(exec_record.status, ExecutionStatus.DISPATCHED)
+
+        # Verify lease was created and active
+        lease = ExecutionLease.objects.get(id=job_payload["lease_id"])
+        self.assertEqual(lease.device_id, "android_device_alpha")
+        self.assertEqual(lease.profile, exec_record.profile)
+
+        # Verify RUN_STARTED event was recorded
+        event = ExecutionEvent.objects.filter(execution=exec_record, event_type=ExecutionEventType.RUN_STARTED).first()
+        self.assertIsNotNone(event)
+        self.assertEqual(event.payload["device_id"], "android_device_alpha")
+
+    def test_claim_next_api_endpoint(self):
+        """Validates POST /api/automation/ghostpilot/claim-next/ HTTP endpoint."""
+        from django.utils import timezone
+        import datetime
+        from automation.scheduler.service import SchedulerService
+        from rest_framework import status
+
+        now = timezone.now()
+        automation = Automation.objects.create(
+            name="API Claim Auto",
+            task=self.task,
+            schedule_type=ScheduleType.ONE_TIME,
+            schedule_config={"run_at": (now - datetime.timedelta(seconds=10)).isoformat()},
+            selection_mode=SelectionMode.NICHE
+        )
+        automation.target_niches.add(self.niche)
+        SchedulerService.evaluate_due_automations(now_dt=now)
+
+        # Post without device_id -> 400 Bad Request
+        res_bad = self.client.post("/api/automation/ghostpilot/claim-next/", {}, format="json")
+        self.assertEqual(res_bad.status_code, status.HTTP_400_BAD_REQUEST)
+
+        # Post with device_id -> 200 OK and receives job
+        res = self.client.post("/api/automation/ghostpilot/claim-next/", {"device_id": "phone_pixel_9"}, format="json")
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertTrue(res.data.get("has_work"))
+        self.assertIsNotNone(res.data.get("job"))
+        self.assertEqual(res.data["job"]["task_id"], str(self.task.id))
+
+
+class AutomationV2RestApiTests(TestCase):
+    """
+    Validates Phase 3: Automation and Run CRUD endpoints, manual trigger,
+    pause/resume, run cancellation, and execution listings.
+    """
+
+    def setUp(self):
+        self.admin = User.objects.create_superuser(
+            username="rest_admin",
+            password="adminpassword123",
+            email="rest@terso.test"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+        self.task = AutomationTask.objects.create(
+            name="API Test Task",
+            category=PlatformCategory.WARMING,
+            config={"actions": 3}
+        )
+
+        self.profile = SavedProfile.objects.create(
+            user=self.admin,
+            name="API Profile",
+            brand="Google",
+            model_name="Pixel 9",
+            model_code="G1234",
+            user_agent="Mozilla/5.0"
+        )
+
+    def test_automation_crud_and_lifecycle_actions(self):
+        """Tests CRUD on /api/automation/automations/, pause, resume, and manual trigger."""
+        # 1. Create Automation
+        create_payload = {
+            "name": "Live Niche Automation",
+            "task": str(self.task.id),
+            "schedule_type": "DAILY",
+            "schedule_config": {"time": "12:00"},
+            "selection_mode": "EXPLICIT_PROFILES",
+            "target_profiles": [str(self.profile.id)],
+            "concurrency_limit": 3,
+            "cooldown_minutes": 15
+        }
+        res_create = self.client.post("/api/automation/automations/", create_payload, format="json")
+        self.assertEqual(res_create.status_code, status.HTTP_201_CREATED)
+        auto_id = res_create.data["id"]
+
+        # 2. List Automations
+        res_list = self.client.get("/api/automation/automations/")
+        self.assertEqual(res_list.status_code, status.HTTP_200_OK)
+        self.assertGreaterEqual(len(res_list.data), 1)
+
+        # 3. Pause
+        res_pause = self.client.post(f"/api/automation/automations/{auto_id}/pause/")
+        self.assertEqual(res_pause.status_code, status.HTTP_200_OK)
+        self.assertFalse(res_pause.data["enabled"])
+
+        # 4. Resume
+        res_resume = self.client.post(f"/api/automation/automations/{auto_id}/resume/")
+        self.assertEqual(res_resume.status_code, status.HTTP_200_OK)
+        self.assertTrue(res_resume.data["enabled"])
+
+        # 5. Trigger run immediately
+        res_trigger = self.client.post(f"/api/automation/automations/{auto_id}/trigger/")
+        self.assertEqual(res_trigger.status_code, status.HTTP_201_CREATED)
+        self.assertIn("run_key", res_trigger.data)
+        run_id = res_trigger.data["id"]
+
+        # 6. View Run executions
+        res_execs = self.client.get(f"/api/automation/runs/{run_id}/executions/")
+        self.assertEqual(res_execs.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res_execs.data), 1)
+
+        # 7. Cancel Run
+        res_cancel = self.client.post(f"/api/automation/runs/{run_id}/cancel/")
+        self.assertEqual(res_cancel.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_cancel.data["status"], "CANCELLED")
+
+        # Verify pending execution marked FAILED upon run cancellation
+        res_execs_after = self.client.get(f"/api/automation/runs/{run_id}/executions/")
+        self.assertEqual(res_execs_after.data[0]["status"], "FAILED")
+
+
+class AutomationV2WatchdogTests(TestCase):
+    """
+    Phase 5 Tests: Watchdog, Lease Reaper, Stalled Execution Reconciliation,
+    Device Health Supervision, and Failure Threshold Circuit Breaker.
+    """
+
+    def setUp(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from devices.models import Device, DeviceStatus
+        from executions.models import (
+            ExecutionStatus,
+            ExecutionLease,
+            ExecutionLeaseStatus,
+            ExecutionEvent,
+            ExecutionEventType,
+            RecoveryStatus,
+        )
+        self.operator = User.objects.create_user(username="watchdog-op", password="password123")
+        self.profile1 = SavedProfile.objects.create(
+            user=self.operator,
+            name="Watchdog Profile 1",
+            brand="Samsung",
+            model_name="Galaxy S24",
+            model_code="SM-S921B",
+            android_version=14,
+            soc="Snapdragon 8 Gen 3",
+            webgl_vendor="Qualcomm",
+            webgl_renderer="Adreno 750",
+            ram_gb=8,
+            cpu_cores=8,
+            screen_width=384,
+            screen_height=854,
+            dpr=2.8,
+            user_agent="Mozilla/5.0"
+        )
+        self.profile2 = SavedProfile.objects.create(
+            user=self.operator,
+            name="Watchdog Profile 2",
+            brand="Google",
+            model_name="Pixel 8",
+            model_code="GP8",
+            android_version=14,
+            soc="Tensor G3",
+            webgl_vendor="ARM",
+            webgl_renderer="Mali-G715",
+            ram_gb=8,
+            cpu_cores=8,
+            screen_width=412,
+            screen_height=915,
+            dpr=2.6,
+            user_agent="Mozilla/5.0"
+        )
+        self.task = AutomationTask.objects.create(
+            name="Watchdog Test Task",
+            category=PlatformCategory.WARMING,
+            config={"required_capabilities": []}
+        )
+        self.automation = Automation.objects.create(
+            name="Watchdog Guarded Automation",
+            task=self.task,
+            schedule_type=ScheduleType.DAILY,
+            selection_mode=SelectionMode.EXPLICIT_PROFILES,
+            max_retries=2,
+            failure_threshold_percent=30,
+            concurrency_limit=5
+        )
+        self.automation.target_profiles.add(self.profile1, self.profile2)
+
+    def test_reap_expired_leases(self):
+        """Tests that the watchdog expires stale leases and frees device locks."""
+        from devices.models import Device, DeviceStatus
+        from executions.models import ExecutionLease, ExecutionLeaseStatus, ExecutionStatus
+        from automation.scheduler.watchdog import AutomationWatchdogService
+
+        now = timezone.now()
+        device = Device.objects.create(
+            device_id="dev-watchdog-01",
+            owner=self.operator,
+            status=DeviceStatus.BUSY,
+            last_seen=now,
+            last_heartbeat=now
+        )
+        exec_item = Execution.objects.create(
+            task=self.task,
+            profile=self.profile1,
+            status=ExecutionStatus.RUNNING
+        )
+        device.current_execution = exec_item
+        device.save()
+
+        # 1. Create an expired lease
+        expired_lease = ExecutionLease.objects.create(
+            profile=self.profile1,
+            registered_device=device,
+            device_id=device.device_id,
+            execution=exec_item,
+            status=ExecutionLeaseStatus.ACTIVE,
+            acquired_at=now - datetime.timedelta(seconds=120),
+            expires_at=now - datetime.timedelta(seconds=10)
+        )
+
+        # 2. Create a fresh, valid lease on another profile
+        valid_lease = ExecutionLease.objects.create(
+            profile=self.profile2,
+            device_id="dev-other",
+            status=ExecutionLeaseStatus.ACTIVE,
+            acquired_at=now,
+            expires_at=now + datetime.timedelta(seconds=60)
+        )
+
+        reaped = AutomationWatchdogService.reap_expired_leases(now_dt=now)
+        self.assertEqual(len(reaped), 1)
+        self.assertEqual(reaped[0].id, expired_lease.id)
+
+        expired_lease.refresh_from_db()
+        self.assertEqual(expired_lease.status, ExecutionLeaseStatus.EXPIRED)
+
+        valid_lease.refresh_from_db()
+        self.assertEqual(valid_lease.status, ExecutionLeaseStatus.ACTIVE)
+
+        # Device should now be ONLINE and current_execution cleared
+        device.refresh_from_db()
+        self.assertEqual(device.status, DeviceStatus.ONLINE)
+        self.assertIsNone(device.current_execution)
+
+    def test_reconcile_stalled_executions_pending_retry(self):
+        """Tests that stalled executions with retries remaining transition to STALLED / PENDING."""
+        from executions.models import Execution, ExecutionStatus, ExecutionLease, ExecutionLeaseStatus, RecoveryStatus
+        from automation.scheduler.watchdog import AutomationWatchdogService
+
+        now = timezone.now()
+        exec_item = Execution.objects.create(
+            task=self.task,
+            profile=self.profile1,
+            status=ExecutionStatus.RUNNING,
+            retry_count=0,
+            max_retries=2
+        )
+        lease = ExecutionLease.objects.create(
+            profile=self.profile1,
+            execution=exec_item,
+            device_id="dev-worker-stalled",
+            status=ExecutionLeaseStatus.EXPIRED,
+            expires_at=now - datetime.timedelta(seconds=30)
+        )
+
+        reconciled = AutomationWatchdogService.reconcile_stalled_executions(now_dt=now)
+        self.assertEqual(len(reconciled), 1)
+
+        exec_item.refresh_from_db()
+        self.assertEqual(exec_item.status, ExecutionStatus.STALLED)
+        self.assertEqual(exec_item.recovery_status, RecoveryStatus.PENDING)
+        self.assertEqual(exec_item.retry_count, 1)
+
+    def test_reconcile_stalled_executions_retries_exhausted(self):
+        """Tests that stalled executions that have reached max_retries transition to FAILED / EXHAUSTED."""
+        from executions.models import Execution, ExecutionStatus, ExecutionLease, ExecutionLeaseStatus, RecoveryStatus
+        from automation.scheduler.watchdog import AutomationWatchdogService
+
+        now = timezone.now()
+        exec_item = Execution.objects.create(
+            task=self.task,
+            profile=self.profile1,
+            status=ExecutionStatus.RUNNING,
+            retry_count=2,
+            max_retries=2
+        )
+        lease = ExecutionLease.objects.create(
+            profile=self.profile1,
+            execution=exec_item,
+            device_id="dev-worker-exhausted",
+            status=ExecutionLeaseStatus.EXPIRED,
+            expires_at=now - datetime.timedelta(seconds=30)
+        )
+
+        reconciled = AutomationWatchdogService.reconcile_stalled_executions(now_dt=now)
+        self.assertEqual(len(reconciled), 1)
+
+        exec_item.refresh_from_db()
+        self.assertEqual(exec_item.status, ExecutionStatus.FAILED)
+        self.assertEqual(exec_item.recovery_status, RecoveryStatus.EXHAUSTED)
+        self.assertIsNotNone(exec_item.completed_at)
+
+    def test_stalled_execution_claimed_by_device_for_recovery(self):
+        """Tests that an eligible device can claim a STALLED (recovery_status=PENDING) execution."""
+        from executions.models import Execution, ExecutionStatus, RecoveryStatus
+        from automation.scheduler.dispatcher import JobDispatcher
+
+        stalled_exec = Execution.objects.create(
+            task=self.task,
+            profile=self.profile1,
+            status=ExecutionStatus.STALLED,
+            recovery_status=RecoveryStatus.PENDING,
+            checkpoint_version=3,
+            last_confirmed_state="nav_complete",
+            entry_state_id="nav_complete"
+        )
+
+        allocated = JobDispatcher.allocate_next_execution(
+            device_id="dev-healer-01",
+            user=self.operator
+        )
+
+        self.assertIsNotNone(allocated)
+        self.assertEqual(allocated["execution_id"], str(stalled_exec.id))
+        self.assertEqual(allocated["recovery_status"], RecoveryStatus.RUNNING)
+        self.assertEqual(allocated["checkpoint_version"], 3)
+        self.assertEqual(allocated["last_confirmed_state"], "nav_complete")
+
+        stalled_exec.refresh_from_db()
+        self.assertEqual(stalled_exec.status, ExecutionStatus.DISPATCHED)
+        self.assertEqual(stalled_exec.recovery_status, RecoveryStatus.RUNNING)
+
+    def test_check_device_health_marks_offline(self):
+        """Tests that devices without heartbeats past the threshold are marked OFFLINE."""
+        from devices.models import Device, DeviceStatus
+        from automation.scheduler.watchdog import AutomationWatchdogService
+
+        now = timezone.now()
+        dead_device = Device.objects.create(
+            device_id="dev-ghost",
+            owner=self.operator,
+            status=DeviceStatus.ONLINE,
+            last_seen=now - datetime.timedelta(seconds=200),
+            last_heartbeat=now - datetime.timedelta(seconds=200)
+        )
+        live_device = Device.objects.create(
+            device_id="dev-active",
+            owner=self.operator,
+            status=DeviceStatus.ONLINE,
+            last_seen=now - datetime.timedelta(seconds=15),
+            last_heartbeat=now - datetime.timedelta(seconds=15)
+        )
+
+        offline = AutomationWatchdogService.check_device_health(offline_threshold_seconds=120, now_dt=now)
+        self.assertEqual(len(offline), 1)
+        self.assertEqual(offline[0].device_id, "dev-ghost")
+
+        dead_device.refresh_from_db()
+        self.assertEqual(dead_device.status, DeviceStatus.OFFLINE)
+
+        live_device.refresh_from_db()
+        self.assertEqual(live_device.status, DeviceStatus.ONLINE)
+
+    def test_evaluate_failure_thresholds_circuit_breaker(self):
+        """Tests Section 26: Automatic pausing when failure threshold percentage is exceeded."""
+        from automation.models import AutomationRun, AutomationRunStatus
+        from executions.models import Execution, ExecutionStatus
+        from automation.scheduler.watchdog import AutomationWatchdogService
+
+        now = timezone.now()
+        run = AutomationRun.objects.create(
+            automation=self.automation,
+            run_key="test_run_breaker_01",
+            status=AutomationRunStatus.RUNNING,
+            total_target_profiles=4,
+            queued_count=2,
+            failure_count=0
+        )
+
+        # 2 failures out of 4 (50% failure rate >= 30% threshold)
+        Execution.objects.create(
+            automation_run=run,
+            task=self.task,
+            profile=self.profile1,
+            status=ExecutionStatus.FAILED
+        )
+        Execution.objects.create(
+            automation_run=run,
+            task=self.task,
+            profile=self.profile2,
+            status=ExecutionStatus.FAILED
+        )
+        pending1 = Execution.objects.create(
+            automation_run=run,
+            task=self.task,
+            profile=self.profile1,
+            status=ExecutionStatus.PENDING
+        )
+        pending2 = Execution.objects.create(
+            automation_run=run,
+            task=self.task,
+            profile=self.profile2,
+            status=ExecutionStatus.PENDING
+        )
+
+        evaluated = AutomationWatchdogService.evaluate_failure_thresholds(now_dt=now)
+        self.assertEqual(len(evaluated), 1)
+
+        run.refresh_from_db()
+        self.assertEqual(run.status, AutomationRunStatus.PARTIAL)
+        self.assertTrue(run.summary_metrics.get("failure_threshold_exceeded"))
+        self.assertEqual(run.failure_count, 2)
+        self.assertEqual(run.queued_count, 0)
+        self.assertEqual(run.cancelled_count, 2)
+
+        pending1.refresh_from_db()
+        self.assertEqual(pending1.status, ExecutionStatus.CANCELLED)
+        pending2.refresh_from_db()
+        self.assertEqual(pending2.status, ExecutionStatus.CANCELLED)
+
+    def test_run_automation_watchdog_command_once(self):
+        """Tests that the management command runs a single sweep cleanly and exits."""
+        from io import StringIO
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command("run_automation_watchdog", once=True, stdout=out)
+        output = out.getvalue()
+        self.assertIn("TersoPilot Automation V2 Watchdog started", output)
+        self.assertIn("Watchdog shut down cleanly", output)
+
+
+class AssistantOperationalToolsTests(TestCase):
+    def setUp(self):
+        from devices.models import SavedProfile, Device, DeviceStatus
+        from executions.models import Execution, ExecutionEvent, ExecutionStatus
+        from automation.models import (
+            AutomationTask,
+            Automation,
+            AutomationRun,
+            ScheduleType,
+            SelectionMode,
+            AutomationRunStatus,
+        )
+
+        self.profile = SavedProfile.objects.create(
+            name="Assistant Test Profile",
+            brand="Samsung",
+            model_name="Galaxy S24",
+            model_code="SM-S921B",
+            android_version=14,
+            soc="Snapdragon 8 Gen 3",
+            webgl_vendor="Qualcomm",
+            webgl_renderer="Adreno (TM) 750",
+            ram_gb=8,
+            cpu_cores=8,
+            screen_width=384,
+            screen_height=854,
+            dpr=2.8125,
+            user_agent="Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
+        )
+        self.device = Device.objects.create(
+            device_id="dev-ai-worker-01",
+            brand="Google",
+            model_name="Pixel 8",
+            android_version=14,
+            battery_percent=88,
+            status=DeviceStatus.ONLINE,
+            last_heartbeat=timezone.now()
+        )
+        self.task = AutomationTask.objects.create(
+            name="Assistant Target Task",
+            category="WARMING",
+            config={"target_url": "https://example.com"}
+        )
+        self.automation = Automation.objects.create(
+            name="Warmup Fleet AI Schedule",
+            task=self.task,
+            enabled=True,
+            schedule_type=ScheduleType.DAILY,
+            schedule_config={"hour": 9, "minute": 30},
+            timezone="UTC",
+            selection_mode=SelectionMode.EXPLICIT_PROFILES,
+            concurrency_limit=2,
+            cooldown_minutes=60,
+            max_retries=3,
+            failure_threshold_percent=30
+        )
+        self.automation.target_profiles.add(self.profile)
+
+    def test_tool_list_automations(self):
+        from automation.assistant_tools import tool_list_automations
+        from automation.models import Automation, ScheduleType, SelectionMode
+
+        # Create disabled automation
+        Automation.objects.create(
+            name="Disabled Backup Automation",
+            task=self.task,
+            enabled=False,
+            schedule_type=ScheduleType.INTERVAL,
+            schedule_config={"minutes": 30},
+            selection_mode=SelectionMode.ALL_ELIGIBLE
+        )
+
+        all_autos = tool_list_automations(enabled_only=False)
+        self.assertGreaterEqual(len(all_autos), 2)
+
+        enabled_autos = tool_list_automations(enabled_only=True)
+        names = [a["name"] for a in enabled_autos]
+        self.assertIn("Warmup Fleet AI Schedule", names)
+        self.assertNotIn("Disabled Backup Automation", names)
+
+    def test_tool_get_automation(self):
+        from automation.assistant_tools import tool_get_automation
+
+        # Lookup by exact name
+        res = tool_get_automation("Warmup Fleet AI Schedule")
+        self.assertEqual(res["name"], "Warmup Fleet AI Schedule")
+        self.assertEqual(res["schedule_type"], "DAILY")
+        self.assertEqual(res["concurrency_limit"], 2)
+        self.assertEqual(res["task_name"], "Assistant Target Task")
+
+        # Lookup by UUID
+        res_by_id = tool_get_automation(str(self.automation.id))
+        self.assertEqual(res_by_id["name"], "Warmup Fleet AI Schedule")
+
+        # Unknown automation
+        err = tool_get_automation("NonExistentAutomation_99")
+        self.assertIn("error", err)
+
+    def test_tool_get_automation_run(self):
+        from automation.assistant_tools import tool_get_automation_run
+        from automation.models import AutomationRun, AutomationRunStatus
+
+        run = AutomationRun.objects.create(
+            automation=self.automation,
+            run_key="test_assistant_run_key_123",
+            status=AutomationRunStatus.RUNNING,
+            total_target_profiles=5,
+            queued_count=3,
+            running_count=1,
+            success_count=1,
+            failure_count=0
+        )
+
+        # Lookup by run_key
+        res = tool_get_automation_run("test_assistant_run_key_123")
+        self.assertEqual(res["run_key"], "test_assistant_run_key_123")
+        self.assertEqual(res["status"], AutomationRunStatus.RUNNING)
+        self.assertEqual(res["total_target_profiles"], 5)
+
+        # Lookup by UUID
+        res_uuid = tool_get_automation_run(str(run.id))
+        self.assertEqual(res_uuid["run_key"], "test_assistant_run_key_123")
+
+        # Unknown run
+        err = tool_get_automation_run("non_existent_run_404")
+        self.assertIn("error", err)
+
+    def test_tool_run_automation_now_guarded(self):
+        from automation.assistant_tools import tool_run_automation_now
+
+        # In read-only mode, write should be blocked
+        with override_settings(ASSISTANT_ALLOW_WRITES=False):
+            res_blocked = tool_run_automation_now("Warmup Fleet AI Schedule")
+            self.assertIn("error", res_blocked)
+            self.assertIn("read-only mode", res_blocked["error"])
+
+        # With writes allowed, run should be minted
+        with override_settings(ASSISTANT_ALLOW_WRITES=True):
+            res = tool_run_automation_now("Warmup Fleet AI Schedule")
+            self.assertEqual(res["status"], "RUNNING")
+            self.assertIn("run_id", res)
+            self.assertEqual(res["automation"], "Warmup Fleet AI Schedule")
+
+    def test_tool_pause_and_resume_automation_guarded(self):
+        from automation.assistant_tools import tool_pause_automation, tool_resume_automation
+
+        with override_settings(ASSISTANT_ALLOW_WRITES=False):
+            res_p = tool_pause_automation("Warmup Fleet AI Schedule")
+            self.assertIn("read-only mode", res_p["error"])
+            res_r = tool_resume_automation("Warmup Fleet AI Schedule")
+            self.assertIn("read-only mode", res_r["error"])
+
+        with override_settings(ASSISTANT_ALLOW_WRITES=True):
+            p_res = tool_pause_automation("Warmup Fleet AI Schedule")
+            self.assertEqual(p_res["status"], "PAUSED")
+            self.automation.refresh_from_db()
+            self.assertFalse(self.automation.enabled)
+
+            r_res = tool_resume_automation("Warmup Fleet AI Schedule")
+            self.assertEqual(r_res["status"], "RESUMED")
+            self.automation.refresh_from_db()
+            self.assertTrue(self.automation.enabled)
+
+    def test_tool_diagnose_fleet_and_get_device_status(self):
+        from automation.assistant_tools import tool_diagnose_fleet, tool_get_device_status
+        from devices.models import Device, DeviceStatus
+
+        # Create low battery device
+        Device.objects.create(
+            device_id="dev-low-batt",
+            brand="Xiaomi",
+            model_name="Redmi 12",
+            android_version=13,
+            battery_percent=12,
+            status=DeviceStatus.ONLINE,
+            last_heartbeat=timezone.now()
+        )
+        # Create stale offline device
+        stale_time = timezone.now() - datetime.timedelta(seconds=200)
+        Device.objects.create(
+            device_id="dev-stale",
+            brand="Transsion",
+            model_name="Infinix Hot 40",
+            android_version=13,
+            battery_percent=75,
+            status=DeviceStatus.OFFLINE,
+            last_heartbeat=stale_time
+        )
+
+        diag = tool_diagnose_fleet()
+        self.assertGreaterEqual(diag["total_nodes"], 3)
+        self.assertIn("dev-low-batt", diag["low_battery_alerts"])
+        self.assertIn("dev-stale", diag["stale_heartbeat_alerts"])
+
+        # Single device lookup
+        single = tool_get_device_status("dev-ai-worker-01")
+        self.assertEqual(single["device_id"], "dev-ai-worker-01")
+        self.assertEqual(single["battery_percent"], 88)
+
+        # Omitted device_id delegates to fleet diagnosis
+        delegated = tool_get_device_status(None)
+        self.assertIn("total_nodes", delegated)
+
+        # Non-existent device
+        err = tool_get_device_status("dev-does-not-exist")
+        self.assertIn("error", err)
+
+    def test_tool_explain_recovery(self):
+        from automation.assistant_tools import tool_explain_recovery
+        from executions.models import Execution, ExecutionEvent, ExecutionStatus
+
+        execution = Execution.objects.create(
+            task=self.task,
+            profile=self.profile,
+            status=ExecutionStatus.STALLED,
+            recovery_status="PENDING",
+            retry_count=1,
+            max_retries=3,
+            checkpoint_version=2,
+            last_confirmed_state="warmup_step_2"
+        )
+        ExecutionEvent.objects.create(
+            execution=execution,
+            event_type="STALLED",
+            payload={"reason": "Heartbeat expired after 120s"}
+        )
+
+        res = tool_explain_recovery(str(execution.id))
+        self.assertEqual(res["execution_id"], str(execution.id))
+        self.assertEqual(res["status"], "STALLED")
+        self.assertEqual(res["checkpoint_version"], 2)
+        self.assertIn("warmup_step_2", res["diagnosis_explanation"])
+        self.assertEqual(len(res["recent_audit_events"]), 1)
+
+        err = tool_explain_recovery(str(uuid.uuid4()))
+        self.assertIn("error", err)
+
+    def test_execute_tool_dispatcher(self):
+        from automation.assistant_tools import execute_tool
+
+        res = execute_tool("list_automations", {"enabled_only": True})
+        self.assertIsInstance(res, list)
+
+        err = execute_tool("unknown_tool_function_12345", {})
+        self.assertIn("error", err)
+
+    def test_openrouter_tools_schema_integrity(self):
+        from automation.assistant_tools import TOOL_MAP, OPENROUTER_TOOLS
+
+        declared_names = {t["function"]["name"] for t in OPENROUTER_TOOLS}
+        for tool_name in TOOL_MAP:
+            self.assertIn(
+                tool_name,
+                declared_names,
+                f"Tool '{tool_name}' in TOOL_MAP must have a corresponding schema in OPENROUTER_TOOLS"
+            )
+
+
+class AutomationStatusManagementCommandTests(TestCase):
+    def setUp(self):
+        from devices.models import SavedProfile, Device, DeviceStatus
+        from automation.models import Automation, AutomationTask, AutomationRun, AutomationRunStatus, ScheduleType, SelectionMode
+
+        self.profile = SavedProfile.objects.create(
+            name="Status Profile",
+            brand="Samsung",
+            model_name="Galaxy S24",
+            user_agent="Mozilla/5.0 Android"
+        )
+        self.device = Device.objects.create(
+            device_id="status-dev-01",
+            brand="Google",
+            model_name="Pixel 8",
+            battery_percent=15,  # low battery alert
+            status=DeviceStatus.ONLINE,
+            last_heartbeat=timezone.now()
+        )
+        self.task = AutomationTask.objects.create(
+            name="Status Task",
+            category="WARMING"
+        )
+        self.automation = Automation.objects.create(
+            name="Status Automation",
+            task=self.task,
+            enabled=True,
+            schedule_type=ScheduleType.DAILY,
+            selection_mode=SelectionMode.ALL_ELIGIBLE
+        )
+        self.run = AutomationRun.objects.create(
+            automation=self.automation,
+            run_key="status_run_01",
+            status=AutomationRunStatus.RUNNING,
+            total_target_profiles=1,
+            queued_count=1
+        )
+
+    def test_automation_status_text_output(self):
+        from io import StringIO
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command("automation_status", stdout=out)
+        output = out.getvalue()
+        self.assertIn("TersoPilot Automation V2 System Status", output)
+        self.assertIn("[1] Automation Rules & Schedules", output)
+        self.assertIn("[2] Execution Queue Depth", output)
+        self.assertIn("[3] Mobile Worker Fleet & Leases", output)
+        self.assertIn("Low Battery Warnings", output)
+        self.assertIn("status-dev-01", output)
+
+    def test_automation_status_json_output(self):
+        import json
+        from io import StringIO
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command("automation_status", json=True, stdout=out)
+        data = json.loads(out.getvalue())
+        self.assertIn("timestamp", data)
+        self.assertIn("automations", data)
+        self.assertIn("queue", data)
+        self.assertIn("fleet", data)
+        self.assertEqual(data["automations"]["total"], 1)
+        self.assertEqual(data["fleet"]["total_devices"], 1)
+        self.assertEqual(len(data["fleet"]["low_battery_alerts"]), 1)
+
+
+class AutomationReconcileManagementCommandTests(TestCase):
+    def setUp(self):
+        from devices.models import SavedProfile, Device, DeviceStatus
+        from automation.models import Automation, AutomationTask, AutomationRun, AutomationRunStatus, ScheduleType, SelectionMode
+        from executions.models import Execution, ExecutionStatus, ExecutionLease, ExecutionPlan
+
+        self.profile = SavedProfile.objects.create(
+            name="Reconcile Profile",
+            brand="Samsung",
+            model_name="Galaxy S24",
+            user_agent="Mozilla/5.0 Android"
+        )
+        self.task = AutomationTask.objects.create(
+            name="Reconcile Task",
+            category="WARMING"
+        )
+        self.plan = ExecutionPlan.objects.create(
+            task=self.task,
+            version=1,
+            compiled_dag={"entry_state": "start", "states": {}}
+        )
+        self.automation = Automation.objects.create(
+            name="Reconcile Automation",
+            task=self.task,
+            enabled=True,
+            schedule_type=ScheduleType.DAILY,
+            selection_mode=SelectionMode.ALL_ELIGIBLE
+        )
+        # 1. Terminated run with orphan PENDING execution
+        self.completed_run = AutomationRun.objects.create(
+            automation=self.automation,
+            run_key="reconcile_completed_run",
+            status=AutomationRunStatus.COMPLETED,
+            total_target_profiles=1
+        )
+        self.orphan_exec = Execution.objects.create(
+            automation_run=self.completed_run,
+            task=self.task,
+            profile=self.profile,
+            status=ExecutionStatus.PENDING
+        )
+        # 2. Expired active lease
+        expired_time = timezone.now() - datetime.timedelta(seconds=60)
+        self.expired_lease = ExecutionLease.objects.create(
+            profile=self.profile,
+            device_id="reconcile-dev-01",
+            status="ACTIVE",
+            acquired_at=expired_time - datetime.timedelta(seconds=60),
+            expires_at=expired_time
+        )
+        # 3. Execution missing plan
+        self.missing_plan_exec = Execution.objects.create(
+            task=self.task,
+            profile=self.profile,
+            status=ExecutionStatus.PENDING,
+            plan=None
+        )
+        # 4. Stale device assignment
+        self.stale_device = Device.objects.create(
+            device_id="reconcile-stale-dev",
+            brand="Google",
+            model_name="Pixel 8",
+            status=DeviceStatus.BUSY,
+            current_execution=Execution.objects.create(
+                task=self.task,
+                profile=self.profile,
+                status=ExecutionStatus.FAILED
+            )
+        )
+
+    def test_automation_reconcile_dry_run(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from executions.models import Execution, ExecutionStatus, ExecutionLease
+        from devices.models import Device, DeviceStatus
+
+        out = StringIO()
+        call_command("automation_reconcile", stdout=out)
+        output = out.getvalue()
+        self.assertIn("AUDIT_ONLY MODE", output)
+        self.assertIn("Total Inconsistencies Detected:", output)
+        self.assertIn("Total Safe Repairs Performed: 0", output)
+
+        # In dry run, records must remain unmodified
+        self.orphan_exec.refresh_from_db()
+        self.assertEqual(self.orphan_exec.status, ExecutionStatus.PENDING)
+
+        self.expired_lease.refresh_from_db()
+        self.assertEqual(self.expired_lease.status, "ACTIVE")
+
+        self.stale_device.refresh_from_db()
+        self.assertEqual(self.stale_device.status, DeviceStatus.BUSY)
+
+    def test_automation_reconcile_repair_mode(self):
+        from io import StringIO
+        from django.core.management import call_command
+        from executions.models import Execution, ExecutionStatus, ExecutionLease
+        from devices.models import Device, DeviceStatus
+
+        out = StringIO()
+        call_command("automation_reconcile", fix=True, stdout=out)
+        output = out.getvalue()
+        self.assertIn("REPAIR MODE", output)
+        self.assertIn("Total Safe Repairs Performed:", output)
+
+        # In repair mode, orphan execution should be cancelled
+        self.orphan_exec.refresh_from_db()
+        self.assertEqual(self.orphan_exec.status, ExecutionStatus.CANCELLED)
+        self.assertIn("Cancelled by automation_reconcile", self.orphan_exec.error_message)
+
+        # Expired active lease should be marked EXPIRED
+        self.expired_lease.refresh_from_db()
+        self.assertEqual(self.expired_lease.status, "EXPIRED")
+
+        # Execution missing plan should be linked to canonical plan
+        self.missing_plan_exec.refresh_from_db()
+        self.assertIsNotNone(self.missing_plan_exec.plan)
+        self.assertEqual(self.missing_plan_exec.plan, self.plan)
+
+        # Stale device should be set to ONLINE and current_execution cleared
+        self.stale_device.refresh_from_db()
+        self.assertEqual(self.stale_device.status, DeviceStatus.ONLINE)
+        self.assertIsNone(self.stale_device.current_execution)
+
+
+class AutomationFleetApiTests(TestCase):
+    def setUp(self):
+        from devices.models import Device, DeviceStatus
+        self.client = APIClient()
+        self.admin = User.objects.create_superuser(username="fleet-admin", password="password123")
+        self.client.force_authenticate(self.admin)
+        self.device = Device.objects.create(
+            device_id="node-fleet-test-01",
+            brand="Samsung",
+            model_name="Galaxy S23",
+            android_version=14,
+            battery_percent=88,
+            status=DeviceStatus.ONLINE
+        )
+
+    def test_get_automation_fleet(self):
+        """Verify GET /api/automation/fleet/ returns device list per Section 31."""
+        resp = self.client.get("/api/automation/fleet/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(any(d["device_id"] == "node-fleet-test-01" for d in resp.data))
+
+    def test_automation_fleet_disable_and_enable(self):
+        """Verify POST /api/automation/fleet/{id}/disable/ and enable/ endpoints."""
+        resp_dis = self.client.post(f"/api/automation/fleet/{self.device.id}/disable/")
+        self.assertEqual(resp_dis.status_code, 200)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.status, "DISABLED")
+
+        resp_en = self.client.post(f"/api/automation/fleet/{self.device.id}/enable/")
+        self.assertEqual(resp_en.status_code, 200)
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.status, "ONLINE")
 

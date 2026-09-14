@@ -1,5 +1,12 @@
 from django.contrib import admin
-from .models import Execution, ExecutionLease, ExecutionEvent
+from .models import Execution, ExecutionLease, ExecutionEvent, ExecutionPlan
+
+
+@admin.register(ExecutionPlan)
+class ExecutionPlanAdmin(admin.ModelAdmin):
+    list_display = ("id", "task", "version", "compiler_version", "created_at")
+    list_filter = ("version", "compiler_version")
+    search_fields = ("task__name", "id")
 
 
 @admin.register(Execution)

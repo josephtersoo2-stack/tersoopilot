@@ -12,6 +12,8 @@ import HardwareBlueprintHub from './components/hardware/HardwareBlueprintHub';
 import RuntimeSettingsHub from './components/system/RuntimeSettingsHub';
 import PersonaModal from './components/automation/PersonaModal';
 import TaskDispatchModal from './components/automation/TaskDispatchModal';
+import AutomationsHub from './components/automation/AutomationsHub';
+import FleetMonitorHub from './components/automation/FleetMonitorHub';
 import { fetchGlobalSettings } from './api';
 
 export default function App({ onLogout }) {
@@ -129,6 +131,14 @@ export default function App({ onLogout }) {
 
         {/* Dynamic View Panels */}
         <main className="p-8 max-w-7xl w-full mx-auto flex-1">
+          {activeTab === 'AUTOMATIONS' && (
+            <AutomationsHub onOpenDispatch={() => setShowDispatchModal(true)} />
+          )}
+
+          {activeTab === 'FLEET' && (
+            <FleetMonitorHub />
+          )}
+
           {activeTab === 'EXECUTION' && (
             <ExecutionConsole onOpenDispatch={() => setShowDispatchModal(true)} />
           )}

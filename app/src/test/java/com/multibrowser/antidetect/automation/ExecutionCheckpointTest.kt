@@ -82,4 +82,37 @@ class ExecutionCheckpointTest {
         assertEquals("CLICK", advanced.lastCommand)
         assertTrue(advanced.updatedAt > initial.updatedAt)
     }
+
+    @Test
+    fun testSection18CheckpointContractFields() {
+        val checkpoint = ExecutionCheckpointEntity(
+            jobId = "exec-v2-101",
+            profileId = "profile-v2-202",
+            currentStateId = "watch_video",
+            executedSteps = 7,
+            lastCommand = "CLICK",
+            planId = "plan-uuid-999",
+            planVersion = "2",
+            contextVars = "{\"target_url\":\"https://example.com\"}",
+            lastTransitionId = "trans-abc-123",
+            checkpointVersion = 4
+        )
+
+        assertEquals("exec-v2-101", checkpoint.jobId)
+        assertEquals("plan-uuid-999", checkpoint.planId)
+        assertEquals("2", checkpoint.planVersion)
+        assertEquals("trans-abc-123", checkpoint.lastTransitionId)
+        assertEquals(4, checkpoint.checkpointVersion)
+        assertTrue(checkpoint.contextVars.contains("example.com"))
+
+        // Increment checkpoint version
+        val nextCheckpoint = checkpoint.copy(
+            executedSteps = checkpoint.executedSteps + 1,
+            checkpointVersion = checkpoint.checkpointVersion + 1,
+            lastTransitionId = "trans-def-456"
+        )
+        assertEquals(8, nextCheckpoint.executedSteps)
+        assertEquals(5, nextCheckpoint.checkpointVersion)
+        assertEquals("trans-def-456", nextCheckpoint.lastTransitionId)
+    }
 }

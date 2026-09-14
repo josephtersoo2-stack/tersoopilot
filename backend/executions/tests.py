@@ -519,3 +519,85 @@ class ExecutionApiTests(TestCase):
         self.assertEqual(legacy_response["Content-Type"], "text/event-stream")
         legacy_content = b"".join(legacy_response.streaming_content).decode("utf-8")
         self.assertIn("RUN_STARTED", legacy_content)
+
+    def test_resume_api_endpoint(self):
+        # Test GET /api/automation/ghostpilot/{id}/resume/
+        response = self.client.get(f"/api/automation/ghostpilot/{self.job.id}/resume/")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+        self.assertEqual(data["execution_id"], str(self.job.id))
+        self.assertIn("plan_version", data)
+        self.assertIn("state_id", data)
+        self.assertIn("checkpoint_version", data)
+        self.assertIn("resume_required", data)
+        self.assertIn("compiled_dag", data)
+
+    def test_heartbeat_contract_v2_continue_and_telemetry(self):
+        from .services import LeaseService
+        from .models import Execution
+        from devices.models import Device
+
+        device = Device.objects.create(
+            device_id="android_hb_worker",
+            model_name="Galaxy S24",
+            battery_percent=100
+        )
+        lease, _ = LeaseService.acquire_lease(self.user, self.profile.id, device.device_id)
+        self.assertIsNotNone(lease)
+
+        payload = {
+            "device_id": device.device_id,
+            "lease_id": str(lease.id),
+            "current_state_id": "step_watch",
+            "checkpoint_version": 5,
+            "battery_percent": 82
+        }
+
+        response = self.client.post(
+            f"/api/automation/ghostpilot/{self.job.id}/heartbeat/",
+            payload,
+            format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+        self.assertEqual(data["action"], "CONTINUE")
+        self.assertEqual(data["checkpoint_version"], 5)
+
+        # Device telemetry updated
+        device.refresh_from_db()
+        self.assertEqual(device.battery_percent, 82)
+        self.assertIsNotNone(device.last_heartbeat)
+
+        # Execution state updated
+        exec_obj = Execution.objects.get(id=self.job.id)
+        self.assertEqual(exec_obj.last_confirmed_state, "step_watch")
+        self.assertEqual(exec_obj.checkpoint_version, 5)
+
+    def test_heartbeat_lease_expired_directive(self):
+        # Heartbeat from a device without an active lease
+        payload = {
+            "device_id": "unauthorized_foreign_device",
+            "current_state_id": "step_watch"
+        }
+        response = self.client.post(
+            f"/api/automation/ghostpilot/{self.job.id}/heartbeat/",
+            payload,
+            format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_410_GONE)
+        data = response.json()
+        self.assertEqual(data["action"], "LEASE_EXPIRED")
+
+    def test_heartbeat_terminal_directive(self):
+        self.job.status = "SUCCESS"
+        self.job.save()
+
+        response = self.client.post(
+            f"/api/automation/ghostpilot/{self.job.id}/heartbeat/",
+            {"device_id": "any_device"},
+            format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        data = response.json()
+        self.assertEqual(data["action"], "TERMINAL_SUCCESS")
+

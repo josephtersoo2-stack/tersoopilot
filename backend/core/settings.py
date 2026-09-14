@@ -14,6 +14,9 @@ if not SECRET_KEY:
     SECRET_KEY = "development-only-do-not-deploy-this-key"
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]").split(",") if h.strip()]
 
+if DEBUG and "*" not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append("*")
+
 # Safety: reject wildcard in non-debug mode
 if not DEBUG and "*" in ALLOWED_HOSTS:
     raise ImproperlyConfigured("Wildcard '*' is not allowed in ALLOWED_HOSTS for production.")

@@ -11,6 +11,40 @@ class ExecutionStatus(models.TextChoices):
     SUCCESS = "SUCCESS", "Success"
     FAILED = "FAILED", "Failed"
     STALLED = "STALLED", "Stalled"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class ExecutionPlan(models.Model):
+    """
+    Durable, versioned execution plan compiled from an AutomationTask.
+    Ensures that historical executions preserve the exact DAG and configuration used at runtime.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task = models.ForeignKey(
+        "automation.AutomationTask",
+        on_delete=models.CASCADE,
+        related_name="plans"
+    )
+    version = models.PositiveIntegerField(default=1)
+    compiler_version = models.CharField(max_length=50, default="v2.0.0")
+    compiled_dag = models.JSONField(default=dict)
+    config_snapshot = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-version"]
+        unique_together = ("task", "version")
+
+    def __str__(self):
+        return f"Plan v{self.version} for {self.task.name}"
+
+
+class RecoveryStatus(models.TextChoices):
+    NONE = "NONE", "None"
+    PENDING = "PENDING", "Pending"
+    RUNNING = "RUNNING", "Running"
+    RESOLVED = "RESOLVED", "Resolved"
+    EXHAUSTED = "EXHAUSTED", "Exhausted"
 
 
 class Execution(models.Model):
@@ -19,6 +53,7 @@ class Execution(models.Model):
     Tracks active DAG state machine progress, context variables, and lifecycle.
     """
     ExecutionStatus = ExecutionStatus
+    RecoveryStatus = RecoveryStatus
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     task = models.ForeignKey(
@@ -31,10 +66,37 @@ class Execution(models.Model):
         on_delete=models.CASCADE,
         related_name="executions"
     )
+    automation_run = models.ForeignKey(
+        "automation.AutomationRun",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="executions"
+    )
+    plan = models.ForeignKey(
+        ExecutionPlan,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="executions"
+    )
+    plan_version = models.CharField(max_length=50, blank=True, default="")
     status = models.CharField(
         max_length=20,
         choices=ExecutionStatus.choices,
         default=ExecutionStatus.PENDING,
+        db_index=True
+    )
+    retry_count = models.PositiveIntegerField(default=0)
+    max_retries = models.PositiveIntegerField(default=2)
+    last_confirmed_state = models.CharField(max_length=100, blank=True, default="")
+    last_confirmed_step = models.IntegerField(null=True, blank=True)
+    last_transition_id = models.CharField(max_length=100, blank=True, default="")
+    checkpoint_version = models.PositiveIntegerField(default=0)
+    recovery_status = models.CharField(
+        max_length=20,
+        choices=RecoveryStatus.choices,
+        default=RecoveryStatus.NONE,
         db_index=True
     )
     entry_state_id = models.CharField(max_length=100, default="start")
@@ -53,6 +115,7 @@ class Execution(models.Model):
         indexes = [
             models.Index(fields=["profile", "status"]),
             models.Index(fields=["task", "status"]),
+            models.Index(fields=["automation_run", "status"]),
         ]
 
     def __str__(self):
@@ -132,6 +195,7 @@ class ExecutionLease(models.Model):
         indexes = [
             models.Index(fields=["profile", "status"]),
             models.Index(fields=["device_id", "status"]),
+            models.Index(fields=["profile", "status", "expires_at"]),
         ]
 
     def __str__(self):

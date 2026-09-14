@@ -5,6 +5,8 @@ from .models import (
     ProfileNicheAffiliation,
     AutomationTask,
     TaskExecutionQueue,
+    Automation,
+    AutomationRun,
 )
 
 @admin.register(Niche)
@@ -35,4 +37,17 @@ class TaskExecutionQueueAdmin(admin.ModelAdmin):
     list_display = ("id", "task", "profile", "created_at")
     list_filter = ("execution__status", "created_at")
     search_fields = ("profile__name", "task__name", "id")
+
+@admin.register(Automation)
+class AutomationAdmin(admin.ModelAdmin):
+    list_display = ("name", "task", "schedule_type", "enabled", "concurrency_limit", "cooldown_minutes", "next_run_at", "created_at")
+    list_filter = ("enabled", "schedule_type", "selection_mode")
+    search_fields = ("name", "description")
+
+@admin.register(AutomationRun)
+class AutomationRunAdmin(admin.ModelAdmin):
+    list_display = ("id", "automation", "run_key", "status", "scheduled_for", "total_target_profiles", "success_count", "failure_count", "created_at")
+    list_filter = ("status", "scheduled_for")
+    search_fields = ("automation__name", "run_key", "id")
+
 

@@ -7,6 +7,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from django.db import transaction
 from django.http import StreamingHttpResponse
+from django.utils import timezone
 from core.permissions import visible_profiles
 from devices.models import SavedProfile
 from .models import Execution, ExecutionStatus
@@ -189,6 +190,32 @@ class GhostPilotExecutionViewSet(viewsets.ReadOnlyModelViewSet):
         profile_id = request.query_params.get("profile_id")
         return self._handle_poll(request, profile_id)
 
+    @action(detail=False, methods=["post"], url_path="claim-next")
+    def claim_next(self, request):
+        """
+        Atomically allocates the next pending execution for the requesting device,
+        acquiring an exclusive profile lease and emitting audit events.
+        """
+        from automation.scheduler.dispatcher import JobDispatcher
+
+        device_id = request.data.get("device_id")
+        if not device_id:
+            return Response(
+                {"error": "device_id is required to claim executions."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        job = JobDispatcher.allocate_next_execution(
+            device_id=device_id,
+            user=request.user if request.user.is_authenticated else None
+        )
+        if job:
+            return Response({"has_work": True, "job": job}, status=status.HTTP_200_OK)
+        return Response(
+            {"has_work": False, "job": None, "message": "No pending jobs eligible for dispatch"},
+            status=status.HTTP_200_OK
+        )
+
     @action(detail=True, methods=["post"], url_path="transition")
     def transition_state(self, request, pk=None):
         """
@@ -218,13 +245,67 @@ class GhostPilotExecutionViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=["post"], url_path="heartbeat")
     def heartbeat(self, request, pk=None):
         """
-        Heartbeat ping from mobile runner to signify active job execution.
+        Heartbeat ping from mobile runner to signify active job execution and telemetry.
         """
         job = self.get_object()
         device_id = request.data.get("device_id")
-        res = ExecutionService.heartbeat(job=job, device_id=device_id)
+        current_state_id = request.data.get("current_state_id")
+        checkpoint_version = request.data.get("checkpoint_version")
+        battery_percent = request.data.get("battery_percent")
+        lease_id = request.data.get("lease_id")
+
+        res = ExecutionService.heartbeat(
+            job=job,
+            device_id=device_id,
+            current_state_id=current_state_id,
+            checkpoint_version=checkpoint_version,
+            battery_percent=battery_percent,
+            lease_id=lease_id
+        )
         status_code = res.pop("status_code", status.HTTP_200_OK)
         return Response(res, status=status_code)
+
+    @action(detail=True, methods=["get"], url_path="resume")
+    def resume(self, request, pk=None):
+        """
+        Resume API: GET /api/automation/ghostpilot/{execution_id}/resume/
+        Returns authoritative plan version, checkpoint state, and DAG for mobile recovery.
+        """
+        from .models import ExecutionStatus, RecoveryStatus, ExecutionLease, ExecutionLeaseStatus
+
+        job = self.get_object()
+        device_id = request.query_params.get("device_id")
+
+        now = timezone.now()
+        active_lease = ExecutionLease.objects.filter(
+            profile=job.profile,
+            status=ExecutionLeaseStatus.ACTIVE,
+            expires_at__gt=now
+        ).first()
+
+        lease_valid = active_lease is not None and (device_id is None or active_lease.device_id == device_id)
+        plan_id = str(job.plan.id) if job.plan else None
+        plan_version = str(job.plan_version or (job.plan.version if job.plan else 1))
+        compiled_dag = job.compiled_dag or (job.plan.compiled_dag if job.plan else {})
+
+        is_terminal = job.status in [ExecutionStatus.SUCCESS, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED]
+        resume_required = not is_terminal and (job.recovery_status != RecoveryStatus.NONE or job.status == ExecutionStatus.STALLED)
+
+        return Response({
+            "execution_id": str(job.id),
+            "job_id": str(job.id),
+            "plan_id": plan_id,
+            "plan_version": plan_version,
+            "state_id": job.last_confirmed_state or job.current_state_id,
+            "step_index": job.last_confirmed_step or 0,
+            "checkpoint_version": job.checkpoint_version,
+            "context": job.execution_context or {},
+            "resume_required": resume_required,
+            "status": job.status,
+            "recovery_status": job.recovery_status,
+            "lease_valid": lease_valid,
+            "compiled_dag": compiled_dag
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="abort")
     def abort(self, request, pk=None):

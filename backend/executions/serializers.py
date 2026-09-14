@@ -1,5 +1,23 @@
 from rest_framework import serializers
-from .models import ExecutionLease, Execution, ExecutionEvent
+from .models import ExecutionLease, Execution, ExecutionEvent, ExecutionPlan
+
+class ExecutionPlanSerializer(serializers.ModelSerializer):
+    task_name = serializers.CharField(source="task.name", read_only=True)
+
+    class Meta:
+        model = ExecutionPlan
+        fields = [
+            "id",
+            "task",
+            "task_name",
+            "version",
+            "compiler_version",
+            "compiled_dag",
+            "config_snapshot",
+            "created_at",
+        ]
+        read_only_fields = ["id", "created_at"]
+
 
 class ExecutionEventSerializer(serializers.ModelSerializer):
     class Meta:
@@ -26,7 +44,17 @@ class ExecutionSerializer(serializers.ModelSerializer):
             "task_name",
             "profile",
             "profile_name",
+            "automation_run",
+            "plan",
+            "plan_version",
             "status",
+            "retry_count",
+            "max_retries",
+            "last_confirmed_state",
+            "last_confirmed_step",
+            "last_transition_id",
+            "checkpoint_version",
+            "recovery_status",
             "entry_state_id",
             "current_state_id",
             "compiled_dag",

@@ -6,6 +6,7 @@ from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status, viewsets
+from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from .models import SavedProfile, GlobalSetting
@@ -261,9 +262,16 @@ class DeviceRegisterView(APIView):
                 "brand": data.get("brand", ""),
                 "model_name": data.get("model_name", ""),
                 "app_version": data.get("app_version", ""),
+                "android_version": data.get("android_version", 14),
+                "geckoview_version": data.get("geckoview_version", ""),
+                "battery_percent": data.get("battery_percent", 100),
+                "screen_width": data.get("screen_width", 384),
+                "screen_height": data.get("screen_height", 854),
+                "capabilities": data.get("capabilities", {}),
                 "metadata": data.get("metadata", {}),
                 "status": DeviceStatus.ONLINE,
                 "last_seen": now,
+                "last_heartbeat": now,
             }
         )
 
@@ -291,25 +299,49 @@ class DeviceHeartbeatView(APIView):
                 device_id=device_id,
                 status=DeviceStatus.ONLINE,
                 last_seen=now,
+                last_heartbeat=now,
             )
         else:
+            update_fields = ["last_seen", "last_heartbeat", "updated_at"]
             device.last_seen = now
-            if device.status == DeviceStatus.OFFLINE:
+            device.last_heartbeat = now
+            if "battery_percent" in request.data:
+                try:
+                    device.battery_percent = int(request.data["battery_percent"])
+                    update_fields.append("battery_percent")
+                except (ValueError, TypeError):
+                    pass
+            if "capabilities" in request.data and isinstance(request.data["capabilities"], dict):
+                device.capabilities.update(request.data["capabilities"])
+                update_fields.append("capabilities")
+            if "metadata" in request.data and isinstance(request.data["metadata"], dict):
+                device.metadata.update(request.data["metadata"])
+                update_fields.append("metadata")
+            if "status" in request.data and request.data["status"] in DeviceStatus.values:
+                device.status = request.data["status"]
+                update_fields.append("status")
+            elif device.status == DeviceStatus.OFFLINE:
                 device.status = DeviceStatus.ONLINE
-            device.save(update_fields=["last_seen", "status", "updated_at"])
+                update_fields.append("status")
+
+            device.save(update_fields=update_fields)
 
         return Response({
             "status": "ALIVE",
             "device_id": device.device_id,
             "device_status": device.status,
-            "last_seen": device.last_seen.isoformat()
+            "battery_percent": device.battery_percent,
+            "last_seen": device.last_seen.isoformat(),
+            "last_heartbeat": device.last_heartbeat.isoformat()
         }, status=status.HTTP_200_OK)
 
 
 class DeviceViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    Inspects registered nodes across the device fleet.
+    Inspects and manages registered nodes across the device fleet.
     GET /api/devices/registry/
+    POST /api/devices/registry/{id}/disable/
+    POST /api/devices/registry/{id}/enable/
     """
     from .serializers import DeviceSerializer
     serializer_class = DeviceSerializer
@@ -317,5 +349,24 @@ class DeviceViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         from .models import Device
-        return Device.objects.filter(owner=self.request.user).order_by("-last_seen")
+        user = self.request.user
+        if user.is_staff or user.is_superuser:
+            return Device.objects.all().order_by("-last_seen")
+        return Device.objects.filter(owner=user).order_by("-last_seen")
+
+    @action(detail=True, methods=["post"], url_path="disable")
+    def disable(self, request, pk=None):
+        from .models import DeviceStatus
+        device = self.get_object()
+        device.status = DeviceStatus.DISABLED
+        device.save(update_fields=["status", "updated_at"])
+        return Response({"status": device.status, "device_id": device.device_id}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="enable")
+    def enable(self, request, pk=None):
+        from .models import DeviceStatus
+        device = self.get_object()
+        device.status = DeviceStatus.ONLINE
+        device.save(update_fields=["status", "updated_at"])
+        return Response({"status": device.status, "device_id": device.device_id}, status=status.HTTP_200_OK)
 

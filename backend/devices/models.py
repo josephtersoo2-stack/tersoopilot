@@ -201,12 +201,14 @@ class DeviceStatus(models.TextChoices):
     ONLINE = "ONLINE", "Online"
     BUSY = "BUSY", "Busy"
     OFFLINE = "OFFLINE", "Offline"
+    DISABLED = "DISABLED", "Disabled"
+    REJECTED = "REJECTED", "Rejected"
 
 
 class Device(models.Model):
     """
     Represents a physical or emulated mobile/desktop node executing automation jobs.
-    Tracks hardware identity, runtime version, heartbeat, and operational status.
+    Tracks hardware identity, runtime version, heartbeat, capabilities, and operational status.
     """
     DeviceStatus = DeviceStatus
 
@@ -218,8 +220,22 @@ class Device(models.Model):
     brand = models.CharField(max_length=100, blank=True, default="")
     model_name = models.CharField(max_length=150, blank=True, default="")
     app_version = models.CharField(max_length=50, blank=True, default="")
+    android_version = models.IntegerField(default=14)
+    geckoview_version = models.CharField(max_length=50, blank=True, default="")
+    battery_percent = models.IntegerField(default=100)
+    screen_width = models.IntegerField(default=384)
+    screen_height = models.IntegerField(default=854)
+    capabilities = models.JSONField(default=dict, blank=True)
     status = models.CharField(max_length=30, choices=DeviceStatus.choices, default=DeviceStatus.ONLINE, db_index=True)
     last_seen = models.DateTimeField(default=timezone.now, db_index=True)
+    last_heartbeat = models.DateTimeField(default=timezone.now, db_index=True)
+    current_execution = models.ForeignKey(
+        "executions.Execution",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="active_on_device"
+    )
     metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

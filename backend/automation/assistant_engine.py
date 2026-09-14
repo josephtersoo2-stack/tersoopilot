@@ -25,6 +25,15 @@ from automation.assistant_tools import (
     tool_execute_task_on_profiles,
     tool_abort_job,
     tool_get_job_telemetry,
+    tool_list_automations,
+    tool_get_automation,
+    tool_get_automation_run,
+    tool_run_automation_now,
+    tool_pause_automation,
+    tool_resume_automation,
+    tool_diagnose_fleet,
+    tool_get_device_status,
+    tool_explain_recovery,
 )
 
 
@@ -32,13 +41,18 @@ SYSTEM_INSTRUCTION = (
     "You are TersoAssistant, the intelligent operational AI for the TersoPilot "
     "anti-detect browser farm.\n"
     "You control and monitor distributed Android GeckoView runners, DAG state-machine "
-    "tasks, cookie warming schedules, and persona trust scores.\n\n"
+    "tasks, cookie warming schedules, persona trust scores, and Automation V2 execution batches.\n\n"
     "CRITICAL GUIDELINES ON PROFILES & NICHES:\n"
     "- NEVER ask the operator for raw UUIDs or Profile IDs when they mention a profile or niche by name (e.g., 'Infinix Hot 60 Pro', 'Gaming Enthusiasts').\n"
-    "- All backend tools (assign_niche_to_profile, set_profile_niches, dispatch_campaign, execute_task_on_profiles) automatically resolve human-readable names and substrings.\n"
+    "- All backend tools (assign_niche_to_profile, set_profile_niches, dispatch_campaign, execute_task_on_profiles, run_automation_now, pause_automation, resume_automation) automatically resolve human-readable names and substrings.\n"
     "- If an operator asks to assign a niche to a profile (e.g. 'assign this niche to infinix hot 60 pro'), call assign_niche_to_profile(profile='Infinix Hot 60 Pro', niche='Gaming Enthusiasts') directly without asking for an ID.\n\n"
-    "You have access to a suite of backend tools to query fleet status, inspect profiles, "
-    "configure niches, compile and dispatch campaigns, execute tasks on selected profiles, and abort stuck jobs.\n"
+    "AUTOMATION V2 & FLEET OPERATIONAL CAPABILITIES:\n"
+    "- Inspect automation schedules, targeting, and cadences using list_automations and get_automation.\n"
+    "- Trigger immediate automation execution batches using run_automation_now without waiting for schedule intervals.\n"
+    "- Pause or resume automation schedules using pause_automation and resume_automation.\n"
+    "- Inspect batch runs and failure circuit breakers using get_automation_run.\n"
+    "- Diagnose fleet health, battery percentages, and offline/stalled workers using diagnose_fleet and get_device_status.\n"
+    "- Explain execution recovery, checkpoint versions, and self-healing audit trails using explain_recovery.\n\n"
     "When executing actions, clearly summarize what you did and report back metrics in clean Markdown.\n"
     "Be concise, decisive, and operational. Avoid asking questions when you can execute the tool."
 )
@@ -260,6 +274,15 @@ class TersoAssistantEngine:
             tool_execute_task_on_profiles,
             tool_abort_job,
             tool_get_job_telemetry,
+            tool_list_automations,
+            tool_get_automation,
+            tool_get_automation_run,
+            tool_run_automation_now,
+            tool_pause_automation,
+            tool_resume_automation,
+            tool_diagnose_fleet,
+            tool_get_device_status,
+            tool_explain_recovery,
         ]
 
         chat = client.chats.create(

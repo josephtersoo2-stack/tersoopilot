@@ -16,7 +16,9 @@ Generated from existing non-ignored repository files. This inventories file role
 | [admin-panel/src/api.js](../admin-panel/src/api.js) | Frontend infrastructure | 41 |
 | [admin-panel/src/auth/AuthGate.jsx](../admin-panel/src/auth/AuthGate.jsx) | Dashboard authentication | 65 |
 | [admin-panel/src/components/automation/AIPromptsHub.jsx](../admin-panel/src/components/automation/AIPromptsHub.jsx) | Dashboard feature UI | 509 |
+| [admin-panel/src/components/automation/AutomationsHub.jsx](../admin-panel/src/components/automation/AutomationsHub.jsx) | Dashboard feature UI | 1067 |
 | [admin-panel/src/components/automation/ExecutionConsole.jsx](../admin-panel/src/components/automation/ExecutionConsole.jsx) | Dashboard feature UI | 412 |
+| [admin-panel/src/components/automation/FleetMonitorHub.jsx](../admin-panel/src/components/automation/FleetMonitorHub.jsx) | Dashboard feature UI | 480 |
 | [admin-panel/src/components/automation/FloatingAssistant.jsx](../admin-panel/src/components/automation/FloatingAssistant.jsx) | Dashboard feature UI | 684 |
 | [admin-panel/src/components/automation/NichesHub.jsx](../admin-panel/src/components/automation/NichesHub.jsx) | Dashboard feature UI | 275 |
 | [admin-panel/src/components/automation/PersonaModal.jsx](../admin-panel/src/components/automation/PersonaModal.jsx) | Dashboard feature UI | 592 |
@@ -42,6 +44,7 @@ Generated from existing non-ignored repository files. This inventories file role
 | [app/src/main/assets/extensions/antidetect/manifest.json](../app/src/main/assets/extensions/antidetect/manifest.json) | Gecko extension | 37 |
 | [app/src/main/assets/extensions/antidetect/perception.js](../app/src/main/assets/extensions/antidetect/perception.js) | Gecko extension | 112 |
 | [app/src/main/java/com/multibrowser/antidetect/MainActivity.kt](../app/src/main/java/com/multibrowser/antidetect/MainActivity.kt) | Android application | 2105 |
+| [app/src/main/java/com/multibrowser/antidetect/automation/AutomationWorkerService.kt](../app/src/main/java/com/multibrowser/antidetect/automation/AutomationWorkerService.kt) | Android application | 346 |
 | [app/src/main/java/com/multibrowser/antidetect/automation/GhostPilotRunner.kt](../app/src/main/java/com/multibrowser/antidetect/automation/GhostPilotRunner.kt) | Android application | 492 |
 | [app/src/main/java/com/multibrowser/antidetect/automation/NativeGestureInjector.kt](../app/src/main/java/com/multibrowser/antidetect/automation/NativeGestureInjector.kt) | Android application | 135 |
 | [app/src/main/java/com/multibrowser/antidetect/automation/input/InputController.kt](../app/src/main/java/com/multibrowser/antidetect/automation/input/InputController.kt) | Android application | 10 |
@@ -111,10 +114,19 @@ Generated from existing non-ignored repository files. This inventories file role
 | [backend/automation/migrations/__init__.py](../backend/automation/migrations/__init__.py) | Workflow and assistant backend | 0 |
 | [backend/automation/models.py](../backend/automation/models.py) | Workflow and assistant backend | 276 |
 | [backend/automation/serializers.py](../backend/automation/serializers.py) | Workflow and assistant backend | 75 |
+| [backend/automation/management/commands/automation_reconcile.py](../backend/automation/management/commands/automation_reconcile.py) | Management command | 261 |
+| [backend/automation/management/commands/automation_status.py](../backend/automation/management/commands/automation_status.py) | Management command | 188 |
+| [backend/automation/management/commands/run_automation_scheduler.py](../backend/automation/management/commands/run_automation_scheduler.py) | Management command | 95 |
+| [backend/automation/management/commands/run_automation_watchdog.py](../backend/automation/management/commands/run_automation_watchdog.py) | Management command | 102 |
+| [backend/automation/scheduler/dispatcher.py](../backend/automation/scheduler/dispatcher.py) | Automation V2 scheduler | 195 |
+| [backend/automation/scheduler/planner.py](../backend/automation/scheduler/planner.py) | Automation V2 scheduler | 240 |
+| [backend/automation/scheduler/policies.py](../backend/automation/scheduler/policies.py) | Automation V2 scheduler | 175 |
+| [backend/automation/scheduler/service.py](../backend/automation/scheduler/service.py) | Automation V2 scheduler | 185 |
+| [backend/automation/scheduler/watchdog.py](../backend/automation/scheduler/watchdog.py) | Automation V2 watchdog | 393 |
 | [backend/automation/signals.py](../backend/automation/signals.py) | Workflow and assistant backend | 17 |
-| [backend/automation/tests.py](../backend/automation/tests.py) | Workflow and assistant backend | 1133 |
-| [backend/automation/urls.py](../backend/automation/urls.py) | Workflow and assistant backend | 24 |
-| [backend/automation/views.py](../backend/automation/views.py) | Workflow and assistant backend | 628 |
+| [backend/automation/tests.py](../backend/automation/tests.py) | Workflow and assistant backend | 2410 |
+| [backend/automation/urls.py](../backend/automation/urls.py) | Workflow and assistant backend | 31 |
+| [backend/automation/views.py](../backend/automation/views.py) | Workflow and assistant backend | 434 |
 | [backend/core/__init__.py](../backend/core/__init__.py) | Django configuration | 1 |
 | [backend/core/asgi.py](../backend/core/asgi.py) | Django configuration | 5 |
 | [backend/core/permissions.py](../backend/core/permissions.py) | Django configuration | 19 |

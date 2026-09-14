@@ -458,17 +458,15 @@ fun AuthDialog(
                         ) {
                             AssistChip(
                                 onClick = {
-                                    serverHostInput = "10.84.158.87"
-
+                                    serverHostInput = "http://192.168.1.45:8001/"
                                 },
-                                label = { Text("USB: 10.84.158.87", style = MaterialTheme.typography.labelSmall) }
+                                label = { Text("Wi-Fi: 192.168.1.45", style = MaterialTheme.typography.labelSmall) }
                             )
                             AssistChip(
                                 onClick = {
                                     serverHostInput = "127.0.0.1"
-
                                 },
-                                label = { Text("ADB: 127.0.0.1", style = MaterialTheme.typography.labelSmall) }
+                                label = { Text("USB: 127.0.0.1", style = MaterialTheme.typography.labelSmall) }
                             )
                         }
                     }

@@ -28,6 +28,11 @@ Bootstrap installs dependencies and copies missing `.env` examples. It never ove
 | Android lint | `python scripts/workflow.py lint-android` | Inspect Android diagnostics |
 | Web/backend gate | `python scripts/workflow.py check` | Regular changes |
 | All build gates | `python scripts/workflow.py check-all` | Changes across clients/API |
+| Scheduler daemon | `python scripts/workflow.py scheduler` | Starts deterministic automation scheduler |
+| Watchdog daemon | `python scripts/workflow.py watchdog` | Starts lease & execution watchdog daemon |
+| Automation status | `python scripts/workflow.py automation-status` | Reports schedules, queue, leases, & fleet |
+| Automation reconcile | `python scripts/workflow.py automation-reconcile` | Audits & safely repairs DB inconsistencies |
+| Automation tests | `python scripts/workflow.py test-automation` | Runs automation & execution test suites |
 | Deployment settings | `python scripts/workflow.py release-check` | Run against real production environment settings |
 
 Commands stop on a failure. CI independently runs backend checks, the dashboard build, and Android tests/build on pushes and pull requests. Frontend compilation is not a replacement for interaction tests.

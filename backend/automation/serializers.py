@@ -9,6 +9,8 @@ from .models import (
     AIPromptConfig,
     AssistantSession,
     AssistantMessage,
+    Automation,
+    AutomationRun,
 )
 
 class NicheSerializer(serializers.ModelSerializer):
@@ -74,4 +76,22 @@ class AssistantSessionSerializer(serializers.ModelSerializer):
     class Meta:
         model = AssistantSession
         fields = ["id", "title", "created_at", "updated_at", "messages"]
+
+
+class AutomationSerializer(serializers.ModelSerializer):
+    task_name = serializers.ReadOnlyField(source="task.name")
+    runs_count = serializers.IntegerField(source="runs.count", read_only=True)
+
+    class Meta:
+        model = Automation
+        fields = "__all__"
+
+
+class AutomationRunSerializer(serializers.ModelSerializer):
+    automation_name = serializers.ReadOnlyField(source="automation.name")
+
+    class Meta:
+        model = AutomationRun
+        fields = "__all__"
+
 

@@ -7,14 +7,14 @@ import org.junit.Test
 class DatabaseMigrationSchemaTest {
 
     @Test
-    fun testDatabaseVersionIs4() {
-        assertEquals("Production hardened database schema version must be 4", 4, AppDatabase.DATABASE_VERSION)
+    fun testDatabaseVersionIs5() {
+        assertEquals("Production hardened database schema version must be 5", 5, AppDatabase.DATABASE_VERSION)
     }
 
     @Test
     fun testMigrationsDefinedInOrder() {
         val migrations = AppDatabase.MIGRATIONS
-        assertEquals("Must contain exactly 3 migration definitions (1->2, 2->3, and 3->4)", 3, migrations.size)
+        assertEquals("Must contain exactly 4 migration definitions (1->2, 2->3, 3->4, and 4->5)", 4, migrations.size)
 
         val m12 = migrations[0]
         assertEquals(1, m12.fromVersion)
@@ -27,6 +27,10 @@ class DatabaseMigrationSchemaTest {
         val m34 = migrations[2]
         assertEquals(3, m34.fromVersion)
         assertEquals(4, m34.toVersion)
+
+        val m45 = migrations[3]
+        assertEquals(4, m45.fromVersion)
+        assertEquals(5, m45.toVersion)
     }
 
     @Test

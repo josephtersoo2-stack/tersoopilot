@@ -2,6 +2,9 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
+from django.conf import settings
+from django.utils import timezone
+from datetime import timedelta
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -81,7 +84,12 @@ class LoginView(APIView):
         if not user:
             return Response({"error": "Invalid username or password.", "code": "INVALID_CREDENTIALS"}, status=400)
 
-        token, _ = Token.objects.get_or_create(user=user)
+        token, created = Token.objects.get_or_create(user=user)
+        if not created:
+            expiry_hours = getattr(settings, "TOKEN_EXPIRY_HOURS", 72)
+            if expiry_hours and token.created < timezone.now() - timedelta(hours=expiry_hours):
+                token.delete()
+                token = Token.objects.create(user=user)
         return Response(
             {
                 "status": "success",

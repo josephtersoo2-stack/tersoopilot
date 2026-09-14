@@ -7,6 +7,7 @@ Automatic Function Calling.
 """
 
 import json
+import uuid
 from typing import Dict, Any, List, Optional
 from devices.models import SavedProfile
 from automation.models import (
@@ -364,6 +365,327 @@ def tool_execute_task_on_profiles(
 
 
 # ---------------------------------------------------------------------------
+# Phase 7: Automation V2 & Fleet Operational Tools
+# ---------------------------------------------------------------------------
+
+def tool_list_automations(enabled_only: bool = False) -> List[Dict[str, Any]]:
+    """List configured V2 automations with their schedules, targeting, and operational status.
+    Optionally filter by enabled_only=True."""
+    from automation.models import Automation
+    qs = Automation.objects.select_related("task").all()
+    if enabled_only:
+        qs = qs.filter(enabled=True)
+
+    results = []
+    for auto in qs:
+        results.append({
+            "id": str(auto.id),
+            "name": auto.name,
+            "task_name": auto.task.name if auto.task else "None",
+            "task_category": auto.task.category if auto.task else "CUSTOM",
+            "enabled": auto.enabled,
+            "schedule_type": auto.schedule_type,
+            "schedule_config": auto.schedule_config or {},
+            "timezone": auto.timezone,
+            "selection_mode": auto.selection_mode,
+            "concurrency_limit": auto.concurrency_limit,
+            "cooldown_minutes": auto.cooldown_minutes,
+            "max_retries": auto.max_retries,
+            "failure_threshold_percent": auto.failure_threshold_percent,
+            "last_run_at": auto.last_run_at.isoformat() if auto.last_run_at else None,
+            "next_run_at": auto.next_run_at.isoformat() if auto.next_run_at else None,
+        })
+    return results
+
+
+def _resolve_automation(identifier: Any):
+    from automation.models import Automation
+    if not identifier:
+        return None
+    if isinstance(identifier, Automation):
+        return identifier
+    ident_str = str(identifier).strip()
+    try:
+        u = uuid.UUID(ident_str)
+        a = Automation.objects.filter(id=u).first()
+        if a:
+            return a
+    except (ValueError, AttributeError):
+        pass
+    a = Automation.objects.filter(name__iexact=ident_str).first()
+    if a:
+        return a
+    return Automation.objects.filter(name__icontains=ident_str).first()
+
+
+def tool_get_automation(automation: str) -> Dict[str, Any]:
+    """Inspect a specific automation schedule definition by name or UUID.
+    Returns its task, cadence, targeting policy, concurrency, cooldown, and last/next run times."""
+    auto = _resolve_automation(automation)
+    if not auto:
+        return {"error": f"Automation '{automation}' not found."}
+    return {
+        "id": str(auto.id),
+        "name": auto.name,
+        "description": auto.description,
+        "task_id": str(auto.task.id) if auto.task else None,
+        "task_name": auto.task.name if auto.task else "None",
+        "task_category": auto.task.category if auto.task else "CUSTOM",
+        "enabled": auto.enabled,
+        "schedule_type": auto.schedule_type,
+        "schedule_config": auto.schedule_config or {},
+        "timezone": auto.timezone,
+        "selection_mode": auto.selection_mode,
+        "target_profile_ids": [str(p.id) for p in auto.target_profiles.all()],
+        "target_niche_ids": [str(n.id) for n in auto.target_niches.all()],
+        "concurrency_limit": auto.concurrency_limit,
+        "cooldown_minutes": auto.cooldown_minutes,
+        "max_runtime_seconds": auto.max_runtime_seconds,
+        "max_retries": auto.max_retries,
+        "failure_threshold_percent": auto.failure_threshold_percent,
+        "last_run_at": auto.last_run_at.isoformat() if auto.last_run_at else None,
+        "next_run_at": auto.next_run_at.isoformat() if auto.next_run_at else None,
+        "created_at": auto.created_at.isoformat() if auto.created_at else None,
+        "updated_at": auto.updated_at.isoformat() if auto.updated_at else None,
+    }
+
+
+def tool_get_automation_run(run_id_or_key: str) -> Dict[str, Any]:
+    """Inspects a specific AutomationRun execution batch by UUID or run_key.
+    Returns status, queued count, running count, success count, failure count, and breaker status."""
+    from automation.models import AutomationRun
+    run = None
+    try:
+        u = uuid.UUID(run_id_or_key.strip())
+        run = AutomationRun.objects.filter(id=u).first()
+    except (ValueError, AttributeError):
+        pass
+
+    if not run:
+        run = AutomationRun.objects.filter(run_key__iexact=run_id_or_key.strip()).first()
+    if not run:
+        run = AutomationRun.objects.filter(run_key__icontains=run_id_or_key.strip()).first()
+
+    if not run:
+        return {"error": f"AutomationRun '{run_id_or_key}' not found."}
+
+    return {
+        "id": str(run.id),
+        "automation_name": run.automation.name if run.automation else "None",
+        "run_key": run.run_key,
+        "status": run.status,
+        "scheduled_for": run.scheduled_for.isoformat() if run.scheduled_for else None,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "total_target_profiles": run.total_target_profiles,
+        "queued_count": run.queued_count,
+        "dispatched_count": run.dispatched_count,
+        "running_count": run.running_count,
+        "success_count": run.success_count,
+        "failure_count": run.failure_count,
+        "stalled_count": run.stalled_count,
+        "cancelled_count": run.cancelled_count,
+        "summary_metrics": run.summary_metrics or {}
+    }
+
+
+def tool_run_automation_now(automation: str) -> Dict[str, Any]:
+    """Immediately triggers an automation schedule by name or UUID without waiting for cron/cadence.
+    Mints an authoritative AutomationRun and queues eligible profile executions."""
+    from automation.scheduler.service import SchedulerService
+    import time
+    auto_obj = _resolve_automation(automation)
+    if not auto_obj:
+        return {"error": f"Automation '{automation}' not found."}
+
+    run_key = f"{auto_obj.id}_assistant_{int(time.time())}"
+    run = SchedulerService.create_run_if_due(
+        automation=auto_obj,
+        run_key=run_key
+    )
+    if not run:
+        return {
+            "status": "FAILED",
+            "error": "Unable to mint run. Check profile eligibility, concurrency limits, or active leases."
+        }
+
+    return {
+        "status": "RUNNING",
+        "run_id": str(run.id),
+        "run_key": run.run_key,
+        "automation": auto_obj.name,
+        "queued_executions": run.queued_count,
+        "total_targets": run.total_target_profiles
+    }
+
+
+def tool_pause_automation(automation: str) -> Dict[str, Any]:
+    """Pauses an automation schedule without deleting configurations.
+    Stops the scheduler from minting new runs."""
+    auto_obj = _resolve_automation(automation)
+    if not auto_obj:
+        return {"error": f"Automation '{automation}' not found."}
+
+    auto_obj.enabled = False
+    auto_obj.save(update_fields=["enabled", "updated_at"])
+    return {
+        "status": "PAUSED",
+        "automation_id": str(auto_obj.id),
+        "name": auto_obj.name,
+        "enabled": False
+    }
+
+
+def tool_resume_automation(automation: str) -> Dict[str, Any]:
+    """Resumes an automation schedule so the scheduler actively evaluates and dispatches it."""
+    auto_obj = _resolve_automation(automation)
+    if not auto_obj:
+        return {"error": f"Automation '{automation}' not found."}
+
+    auto_obj.enabled = True
+    auto_obj.save(update_fields=["enabled", "updated_at"])
+    return {
+        "status": "RESUMED",
+        "automation_id": str(auto_obj.id),
+        "name": auto_obj.name,
+        "enabled": True
+    }
+
+
+def tool_diagnose_fleet() -> Dict[str, Any]:
+    """Performs a comprehensive diagnostic health check across all registered worker nodes.
+    Reports online/busy/offline/disabled device counts, low battery alerts, and stalled devices."""
+    from devices.models import Device, DeviceStatus
+    from django.utils import timezone
+    import datetime
+
+    now = timezone.now()
+    all_devices = Device.objects.all()
+    total = all_devices.count()
+    online = all_devices.filter(status=DeviceStatus.ONLINE).count()
+    busy = all_devices.filter(status=DeviceStatus.BUSY).count()
+    offline = all_devices.filter(status=DeviceStatus.OFFLINE).count()
+    disabled = all_devices.filter(status=DeviceStatus.DISABLED).count()
+
+    device_summaries = []
+    low_battery_nodes = []
+    stale_nodes = []
+
+    for dev in all_devices[:20]:
+        diff_hb = int((now - dev.last_heartbeat).total_seconds()) if dev.last_heartbeat else 9999
+        summary = {
+            "device_id": dev.device_id,
+            "brand": dev.brand,
+            "model_name": dev.model_name,
+            "status": dev.status,
+            "battery_percent": dev.battery_percent,
+            "android_version": dev.android_version,
+            "geckoview_version": dev.geckoview_version or "N/A",
+            "last_heartbeat_seconds_ago": diff_hb,
+            "active_execution": str(dev.current_execution_id) if dev.current_execution_id else None
+        }
+        device_summaries.append(summary)
+        if dev.battery_percent < 20:
+            low_battery_nodes.append(dev.device_id)
+        if diff_hb > 120 and dev.status != DeviceStatus.DISABLED:
+            stale_nodes.append(dev.device_id)
+
+    return {
+        "total_nodes": total,
+        "online_nodes": online,
+        "busy_nodes": busy,
+        "offline_nodes": offline,
+        "disabled_nodes": disabled,
+        "low_battery_alerts": low_battery_nodes,
+        "stale_heartbeat_alerts": stale_nodes,
+        "devices": device_summaries
+    }
+
+
+def tool_get_device_status(device_id: Optional[str] = None) -> Dict[str, Any]:
+    """Inspects status, battery level, online state, hardware specs, and active execution lease
+    for a specific device, or returns full fleet diagnostics if device_id is omitted."""
+    from devices.models import Device
+    from django.utils import timezone
+    if not device_id:
+        return tool_diagnose_fleet()
+
+    now = timezone.now()
+    dev = Device.objects.filter(device_id__iexact=device_id.strip()).first()
+    if not dev:
+        return {"error": f"Device '{device_id}' not found."}
+
+    diff_hb = int((now - dev.last_heartbeat).total_seconds()) if dev.last_heartbeat else 9999
+    return {
+        "device_id": dev.device_id,
+        "brand": dev.brand,
+        "model_name": dev.model_name,
+        "status": dev.status,
+        "battery_percent": dev.battery_percent,
+        "android_version": dev.android_version,
+        "geckoview_version": dev.geckoview_version or "N/A",
+        "last_heartbeat_seconds_ago": diff_hb,
+        "current_execution_id": str(dev.current_execution_id) if dev.current_execution_id else None,
+        "capabilities": dev.capabilities or {}
+    }
+
+
+def tool_explain_recovery(execution_id: str) -> Dict[str, Any]:
+    """Inspects an execution's self-healing recovery trail, checkpoint versions,
+    retry history, and recent audit events to explain why it stalled or how it resumed."""
+    from executions.models import Execution, ExecutionEvent
+    try:
+        u = uuid.UUID(execution_id.strip())
+        execution = Execution.objects.filter(id=u).first()
+    except (ValueError, AttributeError):
+        execution = None
+
+    if not execution:
+        return {"error": f"Execution '{execution_id}' not found."}
+
+    events = ExecutionEvent.objects.filter(execution=execution).order_by("-created_at")[:8]
+    event_trail = [
+        {
+            "event_type": ev.event_type,
+            "created_at": ev.created_at.isoformat(),
+            "payload": ev.payload
+        }
+        for ev in events
+    ]
+
+    diagnosis = "Execution is progressing normally."
+    if execution.status == "STALLED":
+        diagnosis = (
+            f"Execution stalled at state '{execution.last_confirmed_state or execution.current_state_id}' "
+            f"(Checkpoint v{execution.checkpoint_version}). Worker lease timed out or lost connectivity. "
+            f"Recovery status is '{execution.recovery_status}' with {execution.retry_count}/{execution.max_retries} retries used. "
+            "It will be automatically claimed by an eligible online device."
+        )
+    elif execution.status == "FAILED":
+        if execution.recovery_status == "EXHAUSTED":
+            diagnosis = f"Execution failed permanently: retry limit ({execution.max_retries}) exhausted after repeated stalls."
+        else:
+            diagnosis = f"Execution failed with error: {execution.error_message or 'Unknown error'}."
+    elif execution.status == "SUCCESS":
+        diagnosis = f"Execution successfully completed all DAG actions."
+
+    return {
+        "execution_id": str(execution.id),
+        "profile": execution.profile.name if execution.profile else "Unknown",
+        "status": execution.status,
+        "recovery_status": execution.recovery_status,
+        "retry_count": execution.retry_count,
+        "max_retries": execution.max_retries,
+        "checkpoint_version": execution.checkpoint_version,
+        "last_confirmed_state": execution.last_confirmed_state,
+        "last_confirmed_step": execution.last_confirmed_step,
+        "error_message": execution.error_message,
+        "diagnosis_explanation": diagnosis,
+        "recent_audit_events": event_trail
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tool Dispatch Router
 # ---------------------------------------------------------------------------
 
@@ -388,6 +710,9 @@ tool_assign_niche_to_profile = _controlled_write(tool_assign_niche_to_profile)
 tool_dispatch_campaign = _controlled_write(tool_dispatch_campaign)
 tool_execute_task_on_profiles = _controlled_write(tool_execute_task_on_profiles)
 tool_abort_job = _controlled_write(tool_abort_job)
+tool_run_automation_now = _controlled_write(tool_run_automation_now)
+tool_pause_automation = _controlled_write(tool_pause_automation)
+tool_resume_automation = _controlled_write(tool_resume_automation)
 
 TOOL_MAP = {
     "get_fleet_status": tool_get_fleet_status,
@@ -399,6 +724,16 @@ TOOL_MAP = {
     "execute_task_on_profiles": tool_execute_task_on_profiles,
     "abort_job": tool_abort_job,
     "get_job_telemetry": tool_get_job_telemetry,
+    # Phase 7 tools
+    "list_automations": tool_list_automations,
+    "get_automation": tool_get_automation,
+    "get_automation_run": tool_get_automation_run,
+    "run_automation_now": tool_run_automation_now,
+    "pause_automation": tool_pause_automation,
+    "resume_automation": tool_resume_automation,
+    "diagnose_fleet": tool_diagnose_fleet,
+    "get_device_status": tool_get_device_status,
+    "explain_recovery": tool_explain_recovery,
 }
 
 
@@ -666,6 +1001,177 @@ OPENROUTER_TOOLS = [
                     }
                 },
                 "required": ["profile_ids"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_automations",
+            "description": (
+                "List configured V2 automation schedules with their task, cadence, "
+                "targeting policy, concurrency, cooldown, and operational status."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "enabled_only": {
+                        "type": "boolean",
+                        "description": "If true, only returns active/enabled automations."
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_automation",
+            "description": (
+                "Inspect a specific automation schedule definition by name or UUID, "
+                "returning cadence, target profiles/niches, concurrency, cooldown, and last/next run times."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "automation": {
+                        "type": "string",
+                        "description": "Name or UUID of the automation schedule to inspect."
+                    }
+                },
+                "required": ["automation"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_automation_run",
+            "description": (
+                "Inspects a specific AutomationRun execution batch by UUID or run_key. "
+                "Returns status, queued count, running count, success count, failure count, and breaker status."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "run_id_or_key": {
+                        "type": "string",
+                        "description": "UUID or run_key of the automation run batch to inspect."
+                    }
+                },
+                "required": ["run_id_or_key"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_automation_now",
+            "description": (
+                "Immediately triggers an automation schedule by name or UUID without waiting for scheduled cadence. "
+                "Mints an authoritative AutomationRun and queues eligible profile executions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "automation": {
+                        "type": "string",
+                        "description": "Name or UUID of the automation schedule to trigger."
+                    }
+                },
+                "required": ["automation"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "pause_automation",
+            "description": (
+                "Pauses an automation schedule without deleting configurations, "
+                "preventing the scheduler from minting new runs."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "automation": {
+                        "type": "string",
+                        "description": "Name or UUID of the automation schedule to pause."
+                    }
+                },
+                "required": ["automation"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resume_automation",
+            "description": (
+                "Resumes an automation schedule so the scheduler actively evaluates and dispatches it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "automation": {
+                        "type": "string",
+                        "description": "Name or UUID of the automation schedule to resume."
+                    }
+                },
+                "required": ["automation"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "diagnose_fleet",
+            "description": (
+                "Performs a comprehensive diagnostic health check across all registered worker nodes, "
+                "reporting online/busy/offline/disabled device counts, low battery alerts, and stalled devices."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_device_status",
+            "description": (
+                "Inspects status, battery level, online state, hardware specs, and active execution lease "
+                "for a specific device, or diagnoses all devices if device_id is omitted."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "device_id": {
+                        "type": "string",
+                        "description": "Optional hardware device ID to inspect specifically."
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "explain_recovery",
+            "description": (
+                "Inspects an execution's self-healing recovery trail, checkpoint versions, "
+                "retry history, and recent audit events to explain why it stalled or how it resumed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "execution_id": {
+                        "type": "string",
+                        "description": "UUID of the execution to analyze."
+                    }
+                },
+                "required": ["execution_id"]
             }
         }
     }

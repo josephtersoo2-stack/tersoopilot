@@ -129,6 +129,131 @@ class AutomationTask(models.Model):
     def __str__(self):
         return f"[{self.category}] {self.name}"
 
+
+class ScheduleType(models.TextChoices):
+    ONE_TIME = "ONE_TIME", "One Time"
+    DAILY = "DAILY", "Daily"
+    INTERVAL = "INTERVAL", "Interval"
+
+
+class SelectionMode(models.TextChoices):
+    EXPLICIT_PROFILES = "EXPLICIT_PROFILES", "Explicit Profiles"
+    NICHE = "NICHE", "Niche"
+    ALL_ELIGIBLE = "ALL_ELIGIBLE", "All Eligible"
+
+
+class Automation(models.Model):
+    """
+    First-class automation rule defining schedule, targeting, policies, and safeguards.
+    Controls unattended batch execution across profiles.
+    """
+    ScheduleType = ScheduleType
+    SelectionMode = SelectionMode
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default="")
+    task = models.ForeignKey(
+        AutomationTask,
+        on_delete=models.CASCADE,
+        related_name="automations"
+    )
+    enabled = models.BooleanField(default=True, db_index=True)
+    schedule_type = models.CharField(
+        max_length=20,
+        choices=ScheduleType.choices,
+        default=ScheduleType.DAILY
+    )
+    schedule_config = models.JSONField(default=dict, blank=True)
+    timezone = models.CharField(max_length=50, default="UTC")
+    selection_mode = models.CharField(
+        max_length=30,
+        choices=SelectionMode.choices,
+        default=SelectionMode.NICHE
+    )
+    target_niches = models.ManyToManyField(
+        Niche,
+        blank=True,
+        related_name="automations"
+    )
+    target_profiles = models.ManyToManyField(
+        SavedProfile,
+        blank=True,
+        related_name="automations"
+    )
+    concurrency_limit = models.PositiveIntegerField(default=5)
+    cooldown_minutes = models.PositiveIntegerField(default=30)
+    max_runtime_seconds = models.PositiveIntegerField(default=1800)
+    max_retries = models.PositiveIntegerField(default=2)
+    failure_threshold_percent = models.PositiveIntegerField(default=30)
+    priority = models.IntegerField(default=10)
+    active_from = models.DateTimeField(null=True, blank=True)
+    active_until = models.DateTimeField(null=True, blank=True)
+    last_run_at = models.DateTimeField(null=True, blank=True)
+    next_run_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.name} [{self.schedule_type}]"
+
+
+class AutomationRunStatus(models.TextChoices):
+    SCHEDULED = "SCHEDULED", "Scheduled"
+    RUNNING = "RUNNING", "Running"
+    COMPLETED = "COMPLETED", "Completed"
+    PARTIAL = "PARTIAL", "Partial"
+    FAILED = "FAILED", "Failed"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class AutomationRun(models.Model):
+    """
+    Tracks an authoritative campaign execution cycle/batch of an Automation.
+    Guarantees run idempotency across restarts with UNIQUE(automation, run_key).
+    """
+    Status = AutomationRunStatus
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    automation = models.ForeignKey(
+        Automation,
+        on_delete=models.CASCADE,
+        related_name="runs"
+    )
+    run_key = models.CharField(max_length=255, db_index=True)
+    scheduled_for = models.DateTimeField(default=timezone.now, db_index=True)
+    status = models.CharField(
+        max_length=20,
+        choices=AutomationRunStatus.choices,
+        default=AutomationRunStatus.SCHEDULED,
+        db_index=True
+    )
+    total_target_profiles = models.PositiveIntegerField(default=0)
+    queued_count = models.PositiveIntegerField(default=0)
+    dispatched_count = models.PositiveIntegerField(default=0)
+    running_count = models.PositiveIntegerField(default=0)
+    success_count = models.PositiveIntegerField(default=0)
+    failure_count = models.PositiveIntegerField(default=0)
+    stalled_count = models.PositiveIntegerField(default=0)
+    cancelled_count = models.PositiveIntegerField(default=0)
+    skipped_count = models.PositiveIntegerField(default=0)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    summary_metrics = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        unique_together = ("automation", "run_key")
+
+    def __str__(self):
+        return f"Run {self.run_key} [{self.automation.name}] - {self.status}"
+
+
 from executions.models import Execution, ExecutionStatus
 
 

@@ -41,6 +41,7 @@ class GhostPilotRunner(
     var inputController: InputController?,
     var profileName: String = "",
     var cloudSyncId: String = "",
+    var deviceId: String = "",
     private val runnerScope: CoroutineScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 ) {
     private val TAG = "GhostPilotRunner"
@@ -64,6 +65,11 @@ class GhostPilotRunner(
     private var currentDag: JsonObject? = null
     var currentStateId by mutableStateOf<String?>(null)
         private set
+
+    var currentCheckpointVersion: Int = 0
+    var currentPlanId: String = ""
+    var currentPlanVersion: String = "1"
+    var currentContextVars: MutableMap<String, Any> = mutableMapOf()
 
     private var pendingOutcome: String? = null
     private var transitionId: String? = null
@@ -462,6 +468,75 @@ class GhostPilotRunner(
                 "SUCCESS"
             }
 
+            "YT_SCRUB_TIMELINE" -> {
+                val width = (currentTargetView?.width?.toFloat() ?: 1080f).coerceAtLeast(1080f)
+                val height = (currentTargetView?.height?.toFloat() ?: 2400f).coerceAtLeast(2400f)
+                controller?.swipe(
+                    start = ScreenPoint(width * 0.2f, height * 0.25f),
+                    end = ScreenPoint(width * 0.8f, height * 0.25f),
+                    durationMs = 600L
+                )
+                delay(1500L)
+                "SUCCESS"
+            }
+
+            "YT_SCROLL_TO_COMMENTS" -> {
+                val width = (currentTargetView?.width?.toFloat() ?: 1080f).coerceAtLeast(1080f)
+                val height = (currentTargetView?.height?.toFloat() ?: 2400f).coerceAtLeast(2400f)
+                for (i in 1..3) {
+                    controller?.swipe(
+                        start = ScreenPoint(width * 0.5f, height * 0.75f),
+                        end = ScreenPoint(width * 0.5f, height * 0.35f),
+                        durationMs = 650L
+                    )
+                    delay(1200L)
+                }
+                "SUCCESS"
+            }
+
+            "YT_DWELL_ON_COMMENTS" -> {
+                val duration = params.get("duration_seconds")?.asInt ?: 15
+                val checkInterval = 3000L
+                var elapsed = 0
+                val width = (currentTargetView?.width?.toFloat() ?: 1080f).coerceAtLeast(1080f)
+                val height = (currentTargetView?.height?.toFloat() ?: 2400f).coerceAtLeast(2400f)
+                while (elapsed < duration && isRunning) {
+                    val isDown = Math.random() > 0.5
+                    if (isDown) {
+                        controller?.swipe(
+                            start = ScreenPoint(width * 0.5f, height * 0.65f),
+                            end = ScreenPoint(width * 0.5f, height * 0.45f),
+                            durationMs = 800L
+                        )
+                    } else {
+                        controller?.swipe(
+                            start = ScreenPoint(width * 0.5f, height * 0.45f),
+                            end = ScreenPoint(width * 0.5f, height * 0.65f),
+                            durationMs = 800L
+                        )
+                    }
+                    delay(checkInterval)
+                    elapsed += (checkInterval / 1000).toInt() + 1
+                }
+                "SUCCESS"
+            }
+
+            "YT_CLICK_UP_NEXT" -> {
+                val index = params.get("target_index")?.asInt ?: 1
+                val width = (currentTargetView?.width?.toFloat() ?: 1080f).coerceAtLeast(1080f)
+                val height = (currentTargetView?.height?.toFloat() ?: 2400f).coerceAtLeast(2400f)
+                controller?.swipe(
+                    start = ScreenPoint(width * 0.5f, height * 0.75f),
+                    end = ScreenPoint(width * 0.5f, height * 0.35f),
+                    durationMs = 650L
+                )
+                delay(1500L)
+                val yTarget = if (index == 1) height * 0.4f else height * 0.7f
+                controller?.tap(ScreenPoint(width * 0.5f, yTarget))
+                delay(3500L)
+                "SUCCESS"
+            }
+
             "TIER2_FALLBACK" -> requestAiRecoveryDecision()
 
             "TERMINATE", "COMPLETE" -> "SUCCESS"
@@ -536,8 +611,88 @@ class GhostPilotRunner(
         )
     }
 
-    private suspend fun handleTransition(outcome: String, error: String? = null) {
-        val jobId = currentJobId ?: return
+    // --- Section 21 Contract Methods ---
+
+    suspend fun restoreCheckpoint(jobId: String? = null): ExecutionCheckpointEntity? {
+        return if (jobId != null) {
+            db.dao.getCheckpoint(jobId)
+        } else {
+            db.dao.findActiveCheckpoint(profileId) ?: db.dao.getLatestCheckpointForProfile(profileId)
+        }
+    }
+
+    suspend fun saveCheckpoint(
+        stateId: String,
+        stepIndex: Int,
+        lastCommand: String = "",
+        checkpointVersion: Int = currentCheckpointVersion,
+        status: String = "RUNNING"
+    ) {
+        val jId = currentJobId ?: return
+        db.dao.saveCheckpoint(
+            ExecutionCheckpointEntity(
+                jobId = jId,
+                profileId = profileId,
+                currentStateId = stateId,
+                executedSteps = stepIndex,
+                lastCommand = lastCommand,
+                status = status,
+                updatedAt = System.currentTimeMillis(),
+                planId = currentPlanId,
+                planVersion = currentPlanVersion,
+                contextVars = gson.toJson(currentContextVars),
+                lastTransitionId = transitionId ?: "",
+                checkpointVersion = checkpointVersion
+            )
+        )
+    }
+
+    suspend fun requestResumePlan(jobId: String): Boolean {
+        return try {
+            val resp = api.resumeExecution(jobId, deviceId.ifBlank { null })
+            val resumeRequired = resp.get("resume_required")?.asBoolean ?: false
+            if (resp.has("compiled_dag") && !resp.get("compiled_dag").isJsonNull) {
+                currentDag = resp.getAsJsonObject("compiled_dag")
+            }
+            if (resp.has("state_id") && !resp.get("state_id").isJsonNull) {
+                val serverState = resp.get("state_id").asString
+                if (serverState.isNotBlank()) {
+                    currentStateId = serverState
+                }
+            }
+            if (resp.has("step_index") && !resp.get("step_index").isJsonNull) {
+                executedSteps = resp.get("step_index").asInt
+            }
+            if (resp.has("checkpoint_version") && !resp.get("checkpoint_version").isJsonNull) {
+                currentCheckpointVersion = resp.get("checkpoint_version").asInt
+            }
+            if (resp.has("plan_id") && !resp.get("plan_id").isJsonNull) {
+                currentPlanId = resp.get("plan_id").asString
+            }
+            if (resp.has("plan_version") && !resp.get("plan_version").isJsonNull) {
+                currentPlanVersion = resp.get("plan_version").asString
+            }
+            Log.i(TAG, "Reconciled resume plan for $jobId: state=$currentStateId, step=$executedSteps, version=$currentCheckpointVersion")
+            resumeRequired
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to request resume plan for $jobId: ${e.message}")
+            false
+        }
+    }
+
+    suspend fun verifyBeforeReplay(expectedState: String?): Boolean {
+        if (expectedState.isNullOrBlank()) return false
+        val bridge = snapshotBridge ?: return false
+        val verified = verificationEngine.verifyPageState(
+            expectedState = expectedState,
+            timeoutMs = 3000L,
+            getSnapshot = { bridge.captureSnapshot() }
+        )
+        return verified is VerificationResult.Verified
+    }
+
+    suspend fun reportTransition(outcome: String, error: String? = null): Boolean {
+        val jobId = currentJobId ?: return false
         if (transitionId == null) transitionId = java.util.UUID.randomUUID().toString()
         val payload = mutableMapOf<String, Any>(
             "transition_id" to transitionId!!,
@@ -546,26 +701,59 @@ class GhostPilotRunner(
         )
         if (error != null) payload["error"] = error
 
-        val response = api.transitionState(jobId, payload)
-        transitionId = null
-        val isTerminal = response.get("is_terminal")?.asBoolean ?: false
-        val nextState = response.get("current_state_id")?.asString ?: "exit"
+        return try {
+            val response = api.transitionState(jobId, payload)
+            transitionId = null
+            currentCheckpointVersion++
+            val isTerminal = response.get("is_terminal")?.asBoolean ?: false
+            val nextState = response.get("current_state_id")?.asString ?: "exit"
 
-        if (isTerminal || nextState == "exit") {
-            Log.i(TAG, "Job $jobId finalized. Final State: $nextState")
-            db.dao.updateCheckpointStatus(jobId, "COMPLETED")
-            db.dao.clearCheckpoint(jobId)
-            db.dao.clearRecoveryAttempts(jobId)
-            db.dao.clearJobActions(jobId)
-            currentJobId = null
-            currentDag = null
-            currentStateId = null
-            recordedWatchSeconds = 0
-            onStateChanged?.invoke(false, null)
-        } else {
-            currentStateId = nextState
-            onStateChanged?.invoke(isRunning, currentStateId)
+            if (isTerminal || nextState == "exit") {
+                Log.i(TAG, "Job $jobId finalized by server. Final State: $nextState")
+                handleServerTerminalState("TERMINAL_SUCCESS")
+            } else {
+                currentStateId = nextState
+                saveCheckpoint(nextState, executedSteps + 1, checkpointVersion = currentCheckpointVersion)
+                onStateChanged?.invoke(isRunning, currentStateId)
+            }
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Transition network call failed: ${e.message}. Preserving outcome for retry.")
+            pendingOutcome = outcome
+            false
         }
+    }
+
+    fun handleServerTerminalState(directive: String, reason: String? = null) {
+        val activeJobId = currentJobId
+        Log.i(TAG, "Handling server terminal directive: $directive for job $activeJobId (reason: $reason)")
+        if (activeJobId != null) {
+            runnerScope.launch {
+                try {
+                    val status = when (directive) {
+                        "TERMINAL_SUCCESS" -> "COMPLETED"
+                        "CANCEL" -> "CANCELLED"
+                        else -> "FAILED"
+                    }
+                    db.dao.updateCheckpointStatus(activeJobId, status)
+                    db.dao.clearCheckpoint(activeJobId)
+                    db.dao.clearRecoveryAttempts(activeJobId)
+                    db.dao.clearJobActions(activeJobId)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error cleaning up terminal state: ${e.message}")
+                }
+            }
+        }
+        currentJobId = null
+        currentDag = null
+        currentStateId = null
+        recordedWatchSeconds = 0
+        currentCheckpointVersion = 0
+        onStateChanged?.invoke(false, null)
+    }
+
+    private suspend fun handleTransition(outcome: String, error: String? = null) {
+        reportTransition(outcome, error)
     }
 
     private suspend fun requestAiRecoveryDecision(): String {
@@ -629,10 +817,36 @@ class GhostPilotRunner(
         heartbeatJob = runnerScope.launch {
             while (isRunning && currentJobId == jobId) {
                 try {
-                    val heartbeat = api.sendHeartbeat(jobId)
-                    if (heartbeat.get("status")?.asString == "TERMINAL") {
-                        withContext(Dispatchers.Main) { stop() }
-                        break
+                    val hbPayload = mutableMapOf<String, Any>(
+                        "device_id" to deviceId,
+                        "execution_id" to jobId,
+                        "current_state_id" to (currentStateId ?: ""),
+                        "checkpoint_version" to currentCheckpointVersion,
+                        "timestamp" to System.currentTimeMillis()
+                    )
+                    val heartbeat = api.sendHeartbeat(jobId, hbPayload)
+                    val directive = heartbeat.get("action")?.asString
+                        ?: heartbeat.get("directive")?.asString
+                        ?: heartbeat.get("status")?.asString
+
+                    when (directive) {
+                        "TERMINAL_SUCCESS", "TERMINAL_FAILURE", "CANCEL" -> {
+                            Log.i(TAG, "Heartbeat received terminal directive $directive. Stopping runner.")
+                            handleServerTerminalState(directive)
+                            break
+                        }
+                        "LEASE_EXPIRED" -> {
+                            Log.w(TAG, "Heartbeat lease expired on server. Stopping runner.")
+                            handleServerTerminalState("LEASE_EXPIRED")
+                            break
+                        }
+                        "RESUME_REQUIRED" -> {
+                            Log.i(TAG, "Heartbeat requested resume reconciliation.")
+                            requestResumePlan(jobId)
+                        }
+                        else -> {
+                            // CONTINUE / ALIVE - normal execution
+                        }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Heartbeat error: ${e.message}")

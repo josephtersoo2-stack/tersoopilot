@@ -11,6 +11,8 @@ import {
   ShieldCheck,
   Zap,
   MessageCircle,
+  Calendar,
+  Radio,
 } from 'lucide-react';
 
 export default function Sidebar({
@@ -26,6 +28,16 @@ export default function Sidebar({
     {
       title: 'OPERATIONS & TELEMETRY',
       items: [
+        {
+          id: 'AUTOMATIONS',
+          label: 'Automations Hub',
+          icon: Calendar,
+        },
+        {
+          id: 'FLEET',
+          label: 'Fleet Monitor',
+          icon: Radio,
+        },
         {
           id: 'EXECUTION',
           label: 'Execution Console',

@@ -249,25 +249,134 @@ class AccessAndIntegrityTests(TestCase):
             "brand": "Google",
             "model_name": "Pixel 8 Pro",
             "app_version": "1.0.5",
-            "metadata": {"battery": 95}
+            "android_version": 14,
+            "geckoview_version": "135.0",
+            "battery_percent": 95,
+            "screen_width": 412,
+            "screen_height": 915,
+            "capabilities": {
+                "geckoview": True,
+                "screenshot": True,
+                "native_gestures": True
+            },
+            "metadata": {"carrier": "Wi-Fi"}
         }
         # Register device
         reg_resp = self.client.post("/api/devices/register/", payload, format="json")
         self.assertEqual(reg_resp.status_code, 200)
         self.assertEqual(reg_resp.data["device_id"], "pixel_8_pro_node_1")
+        self.assertEqual(reg_resp.data["battery_percent"], 95)
+        self.assertEqual(reg_resp.data["geckoview_version"], "135.0")
+        self.assertTrue(reg_resp.data["capabilities"]["geckoview"])
         self.assertTrue(reg_resp.data["is_online"])
 
         device = Device.objects.get(device_id="pixel_8_pro_node_1")
         self.assertEqual(device.owner, self.owner)
         self.assertEqual(device.status, DeviceStatus.ONLINE)
 
-        # Heartbeat
-        hb_resp = self.client.post("/api/devices/heartbeat/", {"device_id": "pixel_8_pro_node_1"}, format="json")
+        # Heartbeat with battery & status update
+        hb_resp = self.client.post(
+            "/api/devices/heartbeat/",
+            {"device_id": "pixel_8_pro_node_1", "battery_percent": 88, "status": "BUSY"},
+            format="json"
+        )
         self.assertEqual(hb_resp.status_code, 200)
         self.assertEqual(hb_resp.data["status"], "ALIVE")
+        self.assertEqual(hb_resp.data["battery_percent"], 88)
+        self.assertEqual(hb_resp.data["device_status"], "BUSY")
+
+        device.refresh_from_db()
+        self.assertEqual(device.battery_percent, 88)
+        self.assertEqual(device.status, DeviceStatus.BUSY)
 
         # Registry list
         list_resp = self.client.get("/api/devices/registry/")
         self.assertEqual(list_resp.status_code, 200)
         self.assertGreaterEqual(len(list_resp.data), 1)
         self.assertEqual(list_resp.data[0]["device_id"], "pixel_8_pro_node_1")
+
+    def test_device_capability_matching_and_allocation(self):
+        from .models import Device, DeviceStatus
+        from automation.models import Automation, AutomationTask, PlatformCategory, SelectionMode, ScheduleType
+        from automation.scheduler.service import SchedulerService
+        from automation.scheduler.dispatcher import JobDispatcher
+        from executions.models import Execution, ExecutionStatus
+        from executions.services import LeaseService
+        from django.utils import timezone
+        import datetime
+
+        now = timezone.now()
+
+        # Dedicated test profile
+        test_profile = SavedProfile.objects.create(
+            user=self.owner,
+            name="Cap Test Profile",
+            device_sync_id="cap-profile-test"
+        )
+
+        # Create task requiring screenshot capability
+        task = AutomationTask.objects.create(
+            name="Screenshot Dependent Task",
+            category=PlatformCategory.WARMING,
+            config={"required_capabilities": ["screenshot"]}
+        )
+
+        auto = Automation.objects.create(
+            name="Cap Test Auto",
+            task=task,
+            schedule_type=ScheduleType.ONE_TIME,
+            schedule_config={"run_at": (now - datetime.timedelta(seconds=10)).isoformat()},
+            selection_mode=SelectionMode.EXPLICIT_PROFILES,
+            cooldown_minutes=0
+        )
+        auto.target_profiles.add(test_profile)
+
+        SchedulerService.evaluate_due_automations(now_dt=now)
+        pending_exec = Execution.objects.filter(task=task, profile=test_profile, status=ExecutionStatus.PENDING).first()
+        self.assertIsNotNone(pending_exec)
+
+        # 1. Device without screenshot capability should be skipped
+        Device.objects.create(
+            owner=self.owner,
+            device_id="device_no_screenshot",
+            status=DeviceStatus.ONLINE,
+            capabilities={"geckoview": True, "screenshot": False}
+        )
+        job1 = JobDispatcher.allocate_next_execution("device_no_screenshot", user=self.owner)
+        self.assertIsNone(job1)
+
+        # 2. Disabled device should be skipped
+        Device.objects.create(
+            owner=self.owner,
+            device_id="device_disabled",
+            status=DeviceStatus.DISABLED,
+            capabilities={"geckoview": True, "screenshot": True}
+        )
+        job2 = JobDispatcher.allocate_next_execution("device_disabled", user=self.owner)
+        self.assertIsNone(job2)
+
+        # 3. Fully capable online device receives the job
+        capable_device = Device.objects.create(
+            owner=self.owner,
+            device_id="device_fully_capable",
+            status=DeviceStatus.ONLINE,
+            capabilities={"geckoview": True, "screenshot": True}
+        )
+        job3 = JobDispatcher.allocate_next_execution("device_fully_capable", user=self.owner)
+        self.assertIsNotNone(job3)
+        self.assertEqual(job3["execution_id"], str(pending_exec.id))
+
+        capable_device.refresh_from_db()
+        self.assertEqual(capable_device.status, DeviceStatus.BUSY)
+        self.assertEqual(capable_device.current_execution_id, pending_exec.id)
+
+        # Releasing lease clears current_execution on device
+        LeaseService.release_lease(
+            user=self.owner,
+            lease_id=job3["lease_id"],
+            device_id="device_fully_capable"
+        )
+        capable_device.refresh_from_db()
+        self.assertEqual(capable_device.status, DeviceStatus.ONLINE)
+        self.assertIsNone(capable_device.current_execution)
+

@@ -56,13 +56,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["doctor", "bootstrap", "backend", "frontend", "migrate",
         "migration-plan", "createsuperuser", "test-backend", "test-frontend", "test-android",
-        "build-android", "lint-android", "check", "check-all", "release-check"])
+        "build-android", "lint-android", "check", "check-all", "release-check", "scheduler", "watchdog",
+        "automation-status", "automation-reconcile", "test-automation"])
     parser.add_argument("--host", default="127.0.0.1", help="Explicit bind address for backend/frontend")
     args = parser.parse_args()
     cmd = args.command
     if cmd == "doctor": doctor()
     elif cmd == "bootstrap": bootstrap()
     elif cmd == "backend": backend("runserver", args.host + ":8000")
+    elif cmd == "scheduler": backend("run_automation_scheduler")
+    elif cmd == "watchdog": backend("run_automation_watchdog")
+    elif cmd == "automation-status": backend("automation_status")
+    elif cmd == "automation-reconcile": backend("automation_reconcile")
+    elif cmd == "test-automation": backend("test", "automation", "executions")
     elif cmd == "frontend": run([NPM, "run", "dev", "--", "--host", args.host], ROOT / "admin-panel")
     elif cmd == "migrate": backend("migrate")
     elif cmd == "migration-plan": backend("migrate", "--plan")

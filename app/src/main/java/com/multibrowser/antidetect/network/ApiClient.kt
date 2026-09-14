@@ -318,7 +318,7 @@ object RetrofitInstance {
     fun setHost(host: String, clearCredentials: Boolean = true) {
         val value = host.trim().trimEnd('/')
         val candidate = if (value.contains("://")) value else {
-            if (com.multibrowser.antidetect.BuildConfig.DEBUG) "http://$value:8000" else "https://$value"
+            if (com.multibrowser.antidetect.BuildConfig.DEBUG) "http://$value:8001" else "https://$value"
         }
         val url = candidate.toHttpUrl()
         require(url.username.isEmpty() && url.password.isEmpty()) { "Credentials are not allowed in server URLs." }

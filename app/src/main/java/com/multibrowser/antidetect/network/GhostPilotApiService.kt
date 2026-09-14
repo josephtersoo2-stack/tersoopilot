@@ -16,6 +16,17 @@ interface GhostPilotApiService {
         @Query("cloud_sync_id") cloudSyncId: String? = null
     ): JsonObject
 
+    @POST("api/automation/ghostpilot/claim-next/")
+    suspend fun claimNext(
+        @Body payload: Map<String, @JvmSuppressWildcards Any>
+    ): JsonObject
+
+    @GET("api/automation/ghostpilot/{id}/resume/")
+    suspend fun resumeExecution(
+        @Path("id") jobId: String,
+        @Query("device_id") deviceId: String? = null
+    ): JsonObject
+
     @POST("api/automation/ghostpilot/{id}/transition/")
     suspend fun transitionState(
         @Path("id") jobId: String,
@@ -23,11 +34,24 @@ interface GhostPilotApiService {
     ): JsonObject
 
     @POST("api/automation/ghostpilot/{id}/heartbeat/")
-    suspend fun sendHeartbeat(@Path("id") jobId: String): JsonObject
+    suspend fun sendHeartbeat(
+        @Path("id") jobId: String,
+        @Body payload: Map<String, @JvmSuppressWildcards Any> = emptyMap()
+    ): JsonObject
 
     @POST("api/automation/ghostpilot/{id}/decision/")
     suspend fun requestDecision(
         @Path("id") jobId: String,
+        @Body payload: Map<String, @JvmSuppressWildcards Any>
+    ): JsonObject
+
+    @POST("api/devices/register/")
+    suspend fun registerDevice(
+        @Body payload: Map<String, @JvmSuppressWildcards Any>
+    ): JsonObject
+
+    @POST("api/devices/heartbeat/")
+    suspend fun sendDeviceHeartbeat(
         @Body payload: Map<String, @JvmSuppressWildcards Any>
     ): JsonObject
 }

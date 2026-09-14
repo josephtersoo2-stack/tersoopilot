@@ -115,7 +115,7 @@ class LLMConfigAdmin(admin.ModelAdmin):
 
 @admin.register(Device)
 class DeviceAdmin(admin.ModelAdmin):
-    list_display = ("device_id", "owner", "platform", "brand", "model_name", "status", "last_seen", "created_at")
-    list_filter = ("platform", "status", "created_at")
+    list_display = ("device_id", "owner", "status", "battery_percent", "app_version", "geckoview_version", "current_execution", "last_seen", "last_heartbeat")
+    list_filter = ("platform", "status", "android_version", "created_at")
     search_fields = ("device_id", "device_sync_id", "brand", "model_name", "owner__username")
-    readonly_fields = ("id", "created_at", "updated_at")
+    readonly_fields = ("id", "created_at", "updated_at", "last_seen", "last_heartbeat")

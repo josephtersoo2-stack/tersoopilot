@@ -11,5 +11,10 @@ data class ExecutionCheckpointEntity(
     val executedSteps: Int,
     val lastCommand: String = "",
     val status: String = "RUNNING",
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val planId: String = "",
+    val planVersion: String = "1",
+    val contextVars: String = "{}",
+    val lastTransitionId: String = "",
+    val checkpointVersion: Int = 0
 )

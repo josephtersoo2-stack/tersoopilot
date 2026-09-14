@@ -21,16 +21,13 @@ Staff administer the shared fleet and global niches, task templates, AI configur
 Authentication remains compatible with Android's `Authorization: Token` contract. Logout can revoke the account token through the API. The dashboard stores its token in sessionStorage, verifies staff status before rendering, and clears the local session on HTTP 401. Android encrypts its saved token with an Android Keystore AES-GCM key.
 
 ## Execution contract
-
-1. Staff create an AutomationTask with category and configuration.
-2. Dispatch validates 1–100 unique profile UUIDs and creates queue records atomically.
-3. A member or staff client claims an accessible pending job using an atomic status comparison.
-4. Android executes a command, retains its result, and reports a transition ID.
-5. Django applies each transition ID once, checks transition references, and records outcome logs.
-6. Failure at an exit stays FAILED; terminal jobs cannot be advanced again.
-7. Heartbeats return terminal status after an abort. Android stops on that response.
-
-Jobs remain activity-bound and in-memory on Android. A 500-step/30-minute bound stops unbounded execution but is not durable restart recovery. A stopped or disconnected job may still need operator cleanup. Two different devices may claim different jobs for the same profile; installation leases are not implemented.
+1. Staff create an AutomationTask with category and configuration, and optionally an Automation rule (cadence, targeting policy, concurrency, cooldown).
+2. Automation Scheduler or operator mints an authoritative AutomationRun, planning executions with deduplicated `ExecutionPlan` versions.
+3. Android worker nodes (`AutomationWorkerService`) claim pending work via `POST /api/automation/ghostpilot/claim-next/` with an atomic lease (`ExecutionLease`) preventing multi-device collisions.
+4. Android executes commands, persists local SQLite checkpoints (`execution_checkpoints`), and sends heartbeat presence telemetry.
+5. Django Watchdog supervises active leases and heartbeats, reaping dead leases and triggering recovery or circuit breakers.
+6. Android reports transitions with unique `transition_id` idempotency keys.
+7. Terminal executions finalize parent `AutomationRun` counts and metrics, safely audited in `ExecutionEvent`.
 
 ## Structure decisions
 
