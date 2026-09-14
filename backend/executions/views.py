@@ -338,7 +338,7 @@ class GhostPilotExecutionViewSet(viewsets.ReadOnlyModelViewSet):
 
         decision_action = GhostPilotDecisionEngine.resolve_stuck_state(job, snapshot, image_b64)
 
-        if decision_action.next_state_override and decision_action.next_state_override not in job.compiled_dag.get("states", {}):
+        if decision_action.next_state_override and decision_action.next_state_override not in (job.compiled_dag or {}).get("states", {}):
             return Response({"error": "Recovery returned an unknown state."}, status=502)
         if decision_action.next_state_override:
             job.current_state_id = decision_action.next_state_override

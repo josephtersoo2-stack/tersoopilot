@@ -42,7 +42,6 @@ from .serializers import (
 from .compiler import RecipeCompiler
 from .validator import DAGValidator
 from executions.services import ExecutionService
-from .decision_engine import GhostPilotDecisionEngine
 from devices.models import SavedProfile
 
 

@@ -146,7 +146,7 @@ class LLMAdapterFactory:
         task_config: Optional[Dict[str, Any]] = None
     ) -> Optional[BaseLLMAdapter]:
         cfg = task_config or {}
-        provider = provider.upper()
+        provider = (provider or "").upper()
 
         if provider in ["OPENROUTER", "OPENROUTER.AI"]:
             api_key = cfg.get("openrouter_api_key")
@@ -158,7 +158,7 @@ class LLMAdapterFactory:
                     api_key = os.environ.get("OPENROUTER_API_KEY")
             if not api_key:
                 return None
-            return OpenRouterAdapter(api_key=api_key, model_name=model_name)
+            return OpenRouterAdapter(api_key=api_key, model_name=model_name or "deepseek/deepseek-chat")
 
         elif provider == "GEMINI":
             api_key = cfg.get("gemini_api_key")
@@ -178,7 +178,7 @@ class LLMAdapterFactory:
                         api_key = os.environ.get("GEMINI_API_KEY")
             if not api_key:
                 return None
-            return GeminiAdapter(api_key=api_key, model_name=model_name)
+            return GeminiAdapter(api_key=api_key, model_name=model_name or "gemini-2.5-flash")
 
         return None
 
@@ -204,7 +204,16 @@ class GhostPilotDecisionEngine:
         # 2. Determine provider and model (task-level override takes precedence)
         provider = task_cfg.get("ai_provider") or os.environ.get("AI_PROVIDER") or db_config.provider
         model_name = task_cfg.get("ai_model") or os.environ.get("AI_MODEL") or db_config.model_name
-        temperature = float(task_cfg.get("temperature", os.environ.get("AI_TEMPERATURE", db_config.temperature)))
+        
+        temp_val = task_cfg.get("temperature")
+        if temp_val is None:
+            temp_val = os.environ.get("AI_TEMPERATURE")
+        if temp_val is None:
+            temp_val = db_config.temperature
+        try:
+            temperature = float(temp_val)
+        except (ValueError, TypeError):
+            temperature = 0.1
 
         adapter = LLMAdapterFactory.get_adapter(
             provider=provider,
@@ -212,15 +221,29 @@ class GhostPilotDecisionEngine:
             task_config=task_cfg
         )
 
+        entry_state = getattr(job, "entry_state_id", None)
+        compiled_dag = getattr(job, "compiled_dag", {}) or {}
+        states = (compiled_dag.get("states") if isinstance(compiled_dag, dict) else {}) or {}
+        if not entry_state or entry_state not in states:
+            entry_state = compiled_dag.get("entry_state") if isinstance(compiled_dag, dict) else None
+        valid_next_state = entry_state if (entry_state and entry_state in states) else None
+
         if not adapter:
             return AgentRecoveryAction(
                 action="BÉZIER_SWIPE",
                 swipe_direction="DOWN",
-                next_state_override=job.entry_state_id,
+                next_state_override=valid_next_state,
                 reasoning=f"No active API key found for provider '{provider}'. Fallback swipe executed."
             )
 
-        # 3. Format dynamic system prompt template with runtime variables
+        # 3. Clean optional base64 image data URI prefix if provided
+        clean_image_b64 = image_base64.strip() if isinstance(image_base64, str) else None
+        if clean_image_b64 and "," in clean_image_b64 and "base64" in clean_image_b64:
+            clean_image_b64 = clean_image_b64.split(",", 1)[1].strip()
+        if not clean_image_b64:
+            clean_image_b64 = None
+
+        # 4. Format dynamic system prompt template with runtime variables
         raw_template = task_cfg.get("custom_system_prompt")
         if not raw_template:
             try:
@@ -232,16 +255,25 @@ class GhostPilotDecisionEngine:
                 )
             except Exception:
                 raw_template = db_config.system_prompt
+
+        replacements = {
+            "{task_name}": job.task.name if (hasattr(job, "task") and job.task) else "Unknown",
+            "{task_category}": job.task.category if (hasattr(job, "task") and job.task) else "General",
+            "{current_state}": str(getattr(job, "current_state_id", "") or ""),
+            "{execution_context}": json.dumps(getattr(job, "execution_context", {}) or {})
+        }
         try:
             system_instruction = raw_template.format(
-                task_name=job.task.name if (hasattr(job, "task") and job.task) else "Unknown",
-                task_category=job.task.category if (hasattr(job, "task") and job.task) else "General",
-                current_state=job.current_state_id,
-                execution_context=json.dumps(job.execution_context or {})
+                task_name=replacements["{task_name}"],
+                task_category=replacements["{task_category}"],
+                current_state=replacements["{current_state}"],
+                execution_context=replacements["{execution_context}"]
             )
         except Exception:
-            # Fallback if operator typed broken format placeholders
+            # Fallback if operator typed broken format placeholders or included unescaped JSON braces
             system_instruction = raw_template
+            for placeholder, val in replacements.items():
+                system_instruction = system_instruction.replace(placeholder, str(val))
 
         prompt_text = f"Page Snapshot:\n{json.dumps(page_snapshot, indent=2)}"
 
@@ -250,19 +282,26 @@ class GhostPilotDecisionEngine:
                 system_instruction=system_instruction,
                 prompt_text=prompt_text,
                 temperature=temperature,
-                image_base64=image_base64
+                image_base64=clean_image_b64
             )
 
-            if not isinstance(job.logs, list):
-                job.logs = []
-            job.logs.append({
+            if result.next_state_override:
+                override = result.next_state_override.strip()
+                if override.lower() in ("", "null", "none"):
+                    result.next_state_override = None
+                else:
+                    result.next_state_override = override
+
+            current_logs = list(job.logs or []) if isinstance(job.logs, list) else []
+            current_logs.append({
                 "type": "AI_DECISION",
                 "provider": adapter.__class__.__name__,
                 "model": adapter.model_name,
-                "state": job.current_state_id,
+                "state": getattr(job, "current_state_id", ""),
                 "action": result.action,
                 "reasoning": result.reasoning
             })
+            job.logs = current_logs
             job.save()
             return result
 
@@ -270,11 +309,11 @@ class GhostPilotDecisionEngine:
             fallback = AgentRecoveryAction(
                 action="BÉZIER_SWIPE",
                 swipe_direction="DOWN",
-                next_state_override=job.entry_state_id,
+                next_state_override=valid_next_state,
                 reasoning=f"LLM provider error ({str(e)}). Falling back to safe downward swipe."
             )
-            if not isinstance(job.logs, list):
-                job.logs = []
-            job.logs.append({"type": "AI_DECISION_FAILED", "error": str(e)})
+            current_logs = list(job.logs or []) if isinstance(job.logs, list) else []
+            current_logs.append({"type": "AI_DECISION_FAILED", "error": str(e)})
+            job.logs = current_logs
             job.save()
             return fallback
