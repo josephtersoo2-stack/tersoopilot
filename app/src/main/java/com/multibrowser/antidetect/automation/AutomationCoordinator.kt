@@ -61,9 +61,6 @@ class AutomationCoordinator(
         }
     }
 
-    fun startAutomation(profileId: String) {
-        runners[profileId]?.start()
-    }
 
     fun stopAutomation(profileId: String) {
         runners[profileId]?.stop()

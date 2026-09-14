@@ -472,7 +472,13 @@ class ExecutionService:
                 "job_status": job.status,
                 "status_code": 200
             }
-        if job.status == ExecutionStatus.CANCELLED:
+        if job.status == ExecutionStatus.CANCELLED or getattr(job, "cancel_requested", False):
+            job.status = ExecutionStatus.CANCELLED
+            job.save(update_fields=["status", "updated_at"])
+            ExecutionLease.objects.filter(
+                profile=job.profile,
+                status=ExecutionLeaseStatus.ACTIVE
+            ).update(status=ExecutionLeaseStatus.RELEASED)
             return {
                 "action": "CANCEL",
                 "directive": "CANCEL",
@@ -579,9 +585,11 @@ class ExecutionService:
             job = Execution.objects.select_for_update().get(pk=job.pk)
 
         now = timezone.now()
-        job.status = ExecutionStatus.FAILED
-        job.error_message = reason
-        job.completed_at = now
+        if job.status not in (ExecutionStatus.SUCCESS, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED):
+            job.status = ExecutionStatus.CANCELLED
+            job.cancel_requested = True
+            job.error_message = reason
+            job.completed_at = now
 
         if not isinstance(job.logs, list):
             job.logs = []

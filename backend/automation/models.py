@@ -1,4 +1,5 @@
 import uuid
+from django.conf import settings
 from django.db import models
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -153,6 +154,13 @@ class Automation(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True, default="")
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="automations",
+        null=True,
+        blank=True
+    )
     task = models.ForeignKey(
         AutomationTask,
         on_delete=models.CASCADE,
@@ -371,6 +379,8 @@ class TaskExecutionQueue(models.Model):
                     self.execution.started_at = self._started_at
                 if hasattr(self, "_completed_at"):
                     self.execution.completed_at = self._completed_at
+                if hasattr(self, "_cancel_requested"):
+                    self.execution.cancel_requested = self._cancel_requested
                 self.execution.save()
         super().save(*args, **kwargs)
 
@@ -385,6 +395,19 @@ class TaskExecutionQueue(models.Model):
             self._logs = self.execution.logs
             self._completed_at = self.execution.completed_at
             self._started_at = self.execution.started_at
+            self._cancel_requested = self.execution.cancel_requested
+
+    @property
+    def cancel_requested(self):
+        if self.execution:
+            return self.execution.cancel_requested
+        return getattr(self, "_cancel_requested", False)
+
+    @cancel_requested.setter
+    def cancel_requested(self, val):
+        self._cancel_requested = val
+        if self.execution:
+            self.execution.cancel_requested = val
 
     @property
     def status(self):

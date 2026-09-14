@@ -48,6 +48,7 @@ class ExecutionSerializer(serializers.ModelSerializer):
             "plan",
             "plan_version",
             "status",
+            "cancel_requested",
             "retry_count",
             "max_retries",
             "last_confirmed_state",

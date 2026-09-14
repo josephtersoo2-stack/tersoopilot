@@ -44,9 +44,9 @@ class EligibilityEngine:
             )
 
         elif automation.selection_mode == SelectionMode.ALL_ELIGIBLE:
-            # Respect user boundary if automation task has a user
-            if automation.task and automation.task.user:
-                return list(SavedProfile.objects.filter(user=automation.task.user))
+            # Respect user boundary if automation has an owner
+            if getattr(automation, "owner", None):
+                return list(SavedProfile.objects.filter(user=automation.owner))
             return list(SavedProfile.objects.all())
 
         return []

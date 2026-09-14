@@ -103,6 +103,8 @@ class ProfileContextResolver:
     """Resolves weighted niches and persona parameters for a profile."""
     @staticmethod
     def resolve_target_niche(profile: SavedProfile, fallback_niche: Niche = None) -> Niche:
+        if not profile:
+            return fallback_niche
         affiliations = list(profile.niche_affiliations.select_related("niche").all())
         if not affiliations:
             return fallback_niche
@@ -122,6 +124,14 @@ class ProfileContextResolver:
 
     @staticmethod
     def resolve_persona(profile: SavedProfile) -> ProfilePersona:
+        if not profile:
+            return ProfilePersona(
+                patience_index=0.5,
+                engagement_rate=0.15,
+                typing_wpm=60,
+                typo_probability=0.03,
+                trust_score=10,
+            )
         persona, _ = ProfilePersona.objects.get_or_create(profile=profile)
         return persona
 

@@ -72,6 +72,11 @@ import java.net.URLEncoder
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        var activeInstance: MainActivity? = null
+        var activeGeckoViewInstance: GeckoView? = null
+    }
+
     private lateinit var db: AppDatabase
     private lateinit var engine: GeckoProfileEngine
     private lateinit var browserCoordinator: BrowserCoordinator
@@ -79,11 +84,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        activeInstance = this
         db = AppDatabase.getDatabase(this)
         engine = GeckoProfileEngine(this)
         browserCoordinator = BrowserCoordinator(this, db, engine, lifecycleScope)
         AuthManager.init(this)
         ThemeManager.init(this)
+
+        if (AuthManager.isLoggedIn.value) {
+            com.multibrowser.antidetect.automation.AutomationWorkerService.start(this)
+        }
 
         setContent {
             OctoTheme {
@@ -103,6 +113,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        if (activeInstance == this) {
+            activeInstance = null
+            activeGeckoViewInstance = null
+        }
         automationCoordinator.stopAll()
         browserCoordinator.stopAll()
         super.onDestroy()
@@ -574,11 +588,13 @@ class MainActivity : ComponentActivity() {
                                 factory = { ctx ->
                                     GeckoView(ctx).apply {
                                         activeGeckoView = this
+                                        activeGeckoViewInstance = this
                                         setSession(currentSession)
                                     }
                                 },
                                 update = { view ->
                                     activeGeckoView = view
+                                    activeGeckoViewInstance = view
                                     if (view.session != currentSession) {
                                         view.releaseSession()
                                         setSessionSafely(view, currentSession)

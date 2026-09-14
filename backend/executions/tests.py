@@ -398,7 +398,8 @@ class ExecutionServiceTests(TestCase):
         self.assertEqual(res["status"], "ABORTED")
 
         self.job.refresh_from_db()
-        self.assertEqual(self.job.status, "FAILED")
+        self.assertEqual(self.job.status, "CANCELLED")
+        self.assertTrue(self.job.cancel_requested)
         self.assertEqual(self.job.error_message, "Operator stop")
 
         lease.refresh_from_db()

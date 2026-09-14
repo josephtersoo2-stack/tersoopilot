@@ -12,6 +12,14 @@ from .planner import EligibilityEngine, EligibilityReason
 logger = logging.getLogger(__name__)
 
 
+class PlanCompilationError(Exception):
+    """The task cannot be safely compiled into an execution plan."""
+
+
+class ProfilePlanCompilationError(Exception):
+    """Profile-specific compilation failed."""
+
+
 class SchedulerService:
     """
     Authoritative service orchestrating automation schedule evaluation,
@@ -67,18 +75,14 @@ class SchedulerService:
         next_version = (latest_plan.version + 1) if latest_plan else 1
         try:
             compiled_dag = RecipeCompiler.compile_recipe(task, profile=None)
+            from automation.validator import DAGValidator
+            DAGValidator.validate(compiled_dag)
         except Exception as e:
-            logger.warning(
-                f"Canonical recipe compile with null profile failed for task {task.id}: {e}. "
-                "Compiling default fallback DAG."
+            logger.error(
+                f"Canonical recipe compile failed for task '{task.name}' ({task.id}): {e}",
+                exc_info=True
             )
-            compiled_dag = {
-                "entry_state": "init",
-                "states": {
-                    "init": {"cmd": "WAIT", "params": {"seconds": 2}, "on_success": "exit"},
-                    "exit": {"cmd": "TERMINATE", "params": {}}
-                }
-            }
+            raise PlanCompilationError(f"Unable to compile task '{task.name}' ({task.id}): {e}") from e
 
         plan = ExecutionPlan.objects.create(
             task=task,
@@ -117,7 +121,7 @@ class SchedulerService:
                 defaults={
                     "scheduled_for": now,
                     "status": AutomationRunStatus.SCHEDULED,
-                    "started_at": now
+                    "started_at": None
                 }
             )
         except IntegrityError:
@@ -155,7 +159,18 @@ class SchedulerService:
             return run
 
         # Ensure task has a valid ExecutionPlan
-        plan = cls.build_execution_plan(automation.task)
+        try:
+            plan = cls.build_execution_plan(automation.task)
+        except PlanCompilationError as exc:
+            logger.error(f"Cannot dispatch run {run_key}: plan compilation failed: {exc}")
+            run.status = AutomationRunStatus.FAILED
+            run.completed_at = now
+            run.summary_metrics = {
+                "reason": "PLAN_COMPILATION_FAILED",
+                "error": str(exc),
+            }
+            run.save(update_fields=["status", "completed_at", "summary_metrics", "updated_at"])
+            return run
 
         # Batch create PENDING executions
         executions_to_create = []
@@ -163,9 +178,17 @@ class SchedulerService:
             profile = item["profile"]
             # Personalize DAG for this profile/persona if compiler supports it
             try:
+                from automation.validator import DAGValidator
                 profile_dag = RecipeCompiler.compile_recipe(automation.task, profile=profile)
-            except Exception:
-                profile_dag = plan.compiled_dag
+                DAGValidator.validate(profile_dag)
+            except Exception as exc:
+                logger.error(
+                    f"Profile-specific compilation failed for profile {profile.id}: {exc}",
+                    exc_info=True
+                )
+                raise ProfilePlanCompilationError(
+                    f"Profile-specific compilation failed for profile {profile.id}: {exc}"
+                ) from exc
 
             exec_instance = Execution(
                 task=automation.task,

@@ -409,16 +409,29 @@ class AutomationRunViewSet(viewsets.ReadOnlyModelViewSet):
         with transaction.atomic():
             run.status = AutomationRunStatus.CANCELLED
             run.completed_at = now
-            run.save(update_fields=["status", "completed_at", "updated_at"])
 
-            # Cancel pending executions
+            # 1. Transition pending executions to CANCELLED (not FAILED)
             Execution.objects.filter(
                 automation_run=run,
                 status=ExecutionStatus.PENDING
             ).update(
-                status=ExecutionStatus.FAILED,
-                completed_at=now
+                status=ExecutionStatus.CANCELLED,
+                completed_at=now,
+                error_message="Cancelled by operator run abort."
             )
+
+            # 2. Flag active executions for immediate cooperative cancellation
+            Execution.objects.filter(
+                automation_run=run,
+                status__in=[ExecutionStatus.DISPATCHED, ExecutionStatus.RUNNING]
+            ).update(
+                cancel_requested=True
+            )
+
+            # 3. Update cancelled_count accurately
+            cancelled_total = run.executions.filter(status=ExecutionStatus.CANCELLED).count()
+            run.cancelled_count = cancelled_total
+            run.save(update_fields=["status", "completed_at", "cancelled_count", "updated_at"])
 
         return Response(AutomationRunSerializer(run).data, status=status.HTTP_200_OK)
 

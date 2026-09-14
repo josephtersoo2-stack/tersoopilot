@@ -43,6 +43,10 @@ class AutomationWorkerService : Service() {
         RetrofitInstance.retrofit.create(GhostPilotApiService::class.java)
     }
 
+    private val sessionManager by lazy {
+        WorkerProfileSessionManager(this@AutomationWorkerService)
+    }
+
     private var activeJobId: String? = null
     private var activeProfileName: String? = null
 
@@ -178,22 +182,55 @@ class AutomationWorkerService : Service() {
                 val hasWork = claimResp.get("has_work")?.asBoolean ?: false
                 if (hasWork && claimResp.has("job") && !claimResp.get("job").isJsonNull) {
                     val job = claimResp.getAsJsonObject("job")
-                    val jobId = job.get("execution_id")?.asString ?: job.get("id")?.asString
-                    val profileId = job.get("profile_id")?.asString ?: ""
-                    val profileName = job.get("profile_name")?.asString ?: "Profile $profileId"
+                    val execution = try {
+                        ClaimedExecution.fromJsonObject(job)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to parse claimed execution envelope: ${e.message}")
+                        null
+                    }
 
-                    if (!jobId.isNullOrBlank()) {
-                        activeJobId = jobId
-                        activeProfileName = profileName
+                    if (execution != null) {
+                        activeJobId = execution.executionId
+                        activeProfileName = execution.profileName
                         acquireWakeLock()
-                        updateNotification("Executing job on $profileName (ID: ${jobId.take(8)})")
+                        updateNotification("Running: ${execution.profileName} [${execution.executionId.take(8)}]")
+                        Log.i(TAG, "Claimed execution ${execution.executionId} on profile ${execution.profileName}. Preparing session...")
 
-                        Log.i(TAG, "Claimed execution $jobId on profile $profileName. Processing...")
-                        // Active job tracking
-                        activeJobId = null
-                        activeProfileName = null
-                        releaseWakeLock()
-                        updateNotification("Job completed. Checking next eligible task...")
+                        var workerContext: WorkerExecutionContext? = null
+                        try {
+                            workerContext = sessionManager.prepare(
+                                profileId = execution.profileId,
+                                profileName = execution.profileName,
+                                deviceId = deviceId
+                            )
+                            updateNotification("Executing DAG on ${execution.profileName}...")
+                            val result = workerContext.runner.execute(execution)
+                            Log.i(TAG, "Execution ${execution.executionId} finished. Success: ${result.success}, State: ${result.terminalState}, Steps: ${result.stepsExecuted}")
+                            updateNotification("Completed ${execution.profileName} (Status: ${result.terminalState})")
+                        } catch (e: CancellationException) {
+                            Log.i(TAG, "Execution cancelled for ${execution.executionId}")
+                            throw e
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Execution failed for ${execution.executionId}: ${e.message}", e)
+                            updateNotification("Execution failed: ${e.message?.take(30)}")
+                            try {
+                                api.transitionState(
+                                    execution.executionId,
+                                    mapOf(
+                                        "transition_id" to java.util.UUID.randomUUID().toString(),
+                                        "outcome" to "FAILURE",
+                                        "error" to (e.message ?: "Worker execution failure")
+                                    )
+                                )
+                            } catch (ignored: Exception) {}
+                        } finally {
+                            if (workerContext != null) {
+                                sessionManager.cleanup(workerContext)
+                            }
+                            activeJobId = null
+                            activeProfileName = null
+                            releaseWakeLock()
+                        }
                     }
                 } else {
                     updateNotification("Online - Idle. Waiting for scheduled automations.")

@@ -99,6 +99,7 @@ class Execution(models.Model):
         default=RecoveryStatus.NONE,
         db_index=True
     )
+    cancel_requested = models.BooleanField(default=False, db_index=True)
     entry_state_id = models.CharField(max_length=100, default="start")
     current_state_id = models.CharField(max_length=100, default="start")
     compiled_dag = models.JSONField(default=dict)
@@ -196,6 +197,13 @@ class ExecutionLease(models.Model):
             models.Index(fields=["profile", "status"]),
             models.Index(fields=["device_id", "status"]),
             models.Index(fields=["profile", "status", "expires_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["profile"],
+                condition=models.Q(status="ACTIVE"),
+                name="uniq_active_lease_per_profile"
+            )
         ]
 
     def __str__(self):

@@ -33,6 +33,14 @@ import org.mozilla.geckoview.GeckoSession
  * 5. Static DAG Pre-Validation via CommandRegistry.
  * 6. Dynamic Server Limits: Configurable max_steps and timeout_seconds.
  */
+data class ExecutionResult(
+    val success: Boolean,
+    val executionId: String,
+    val terminalState: String?,
+    val stepsExecuted: Int,
+    val error: String? = null
+)
+
 class GhostPilotRunner(
     private val context: Context,
     val profileId: String,
@@ -103,13 +111,9 @@ class GhostPilotRunner(
 
     fun start() {
         if (isRunning) return
+        Log.i(TAG, "GhostPilot runner started for profile: $profileId")
         isRunning = true
         onStateChanged?.invoke(true, currentStateId)
-
-        executionJob = runnerScope.launch {
-            Log.i(TAG, "GhostPilot runner started for profile: $profileId (name=$profileName, cloudSyncId=$cloudSyncId)")
-            executionLoop()
-        }
     }
 
     fun stop() {
@@ -147,113 +151,103 @@ class GhostPilotRunner(
         Log.i(TAG, "GhostPilot runner stopped for profile: $profileId")
     }
 
-    private suspend fun executionLoop() {
-        while (isRunning) {
-            try {
-                // 1. Resume from durable execution checkpoint if process was killed or interrupted
-                if (currentJobId == null) {
-                    val pendingCheckpoint = db.dao.findActiveCheckpoint(profileId)
-                        ?: db.dao.getLatestCheckpointForProfile(profileId)
+    suspend fun execute(execution: ClaimedExecution): ExecutionResult {
+        currentJobId = execution.executionId
+        currentDag = execution.compiledDag
+        currentStateId = execution.entryState
+        currentPlanId = execution.planId.orEmpty()
+        currentPlanVersion = execution.planVersion
+        currentCheckpointVersion = execution.checkpointVersion
+        executedSteps = execution.lastConfirmedStep ?: 0
+        jobStartedAt = android.os.SystemClock.elapsedRealtime()
+        isRunning = true
+        onStateChanged?.invoke(true, currentStateId)
 
-                    if (pendingCheckpoint != null && pendingCheckpoint.status == "RUNNING" &&
-                        (System.currentTimeMillis() - pendingCheckpoint.updatedAt < 12 * 3600 * 1000L)) {
-                        Log.i(TAG, "Restoring execution from persistent checkpoint: Job ${pendingCheckpoint.jobId} at step ${pendingCheckpoint.executedSteps}, state ${pendingCheckpoint.currentStateId}")
-                        currentJobId = pendingCheckpoint.jobId
-                        currentStateId = pendingCheckpoint.currentStateId
-                        executedSteps = pendingCheckpoint.executedSteps
-                        onStateChanged?.invoke(true, currentStateId)
-                    }
-                }
+        Log.i(TAG, "GhostPilotRunner executing claimed job ${execution.executionId} on profile $profileId (plan: $currentPlanId v$currentPlanVersion, entry: $currentStateId)")
 
-                // 2. Poll for pending job if idle
-                if (currentJobId == null) {
-                    val pollResp = api.pollJob(profileId, profileName.ifBlank { null }, cloudSyncId.ifBlank { null })
-                    if (pollResp.has("work_available") && pollResp.get("work_available").asBoolean) {
-                        val receivedJobId = pollResp.get("job_id").asString
-                        val receivedEntryState = pollResp.get("entry_state").asString
-                        val receivedDag = pollResp.getAsJsonObject("dag")
+        // 1. Static Pre-validation of DAG commands before executing
+        val validation = CommandRegistry.validateDag(execution.compiledDag)
+        if (validation is CommandRegistry.ValidationResult.Invalid) {
+            Log.e(TAG, "Rejecting job ${execution.executionId}: ${validation.reason}")
+            handleTransition("FAILURE", error = "DAG validation rejected: ${validation.reason}")
+            isRunning = false
+            return ExecutionResult(
+                success = false,
+                executionId = execution.executionId,
+                terminalState = "FAILURE",
+                stepsExecuted = 0,
+                error = "DAG validation rejected: ${validation.reason}"
+            )
+        }
 
-                        // Static Pre-validation of DAG commands before claiming/executing
-                        val validation = CommandRegistry.validateDag(receivedDag)
-                        if (validation is CommandRegistry.ValidationResult.Invalid) {
-                            Log.e(TAG, "Rejecting job $receivedJobId: ${validation.reason}")
-                            currentJobId = receivedJobId
-                            handleTransition("FAILURE", error = "DAG validation rejected: ${validation.reason}")
-                            currentJobId = null
-                            currentDag = null
-                            continue
-                        }
+        // 2. Reconcile checkpoint
+        if (!execution.lastConfirmedState.isNullOrBlank()) {
+            currentStateId = execution.lastConfirmedState
+            Log.i(TAG, "Reconciled execution from server checkpoint state: $currentStateId (step: $executedSteps)")
+        } else {
+            val pendingCheckpoint = db.dao.findActiveCheckpoint(profileId)
+            if (pendingCheckpoint != null && pendingCheckpoint.jobId == execution.executionId) {
+                currentStateId = pendingCheckpoint.currentStateId
+                executedSteps = pendingCheckpoint.executedSteps
+                Log.i(TAG, "Restored execution from local Room checkpoint: state $currentStateId (step: $executedSteps)")
+            }
+        }
 
-                        currentJobId = receivedJobId
-                        currentStateId = receivedEntryState
-                        currentDag = receivedDag
-                        Log.i(TAG, "Claimed Job: $currentJobId. Entry State: $currentStateId")
-                        onStateChanged?.invoke(true, currentStateId)
+        launchHeartbeat(execution.executionId)
 
-                        executedSteps = 0
-                        jobStartedAt = android.os.SystemClock.elapsedRealtime()
-                        launchHeartbeat(currentJobId!!)
-                    } else {
-                        delay(5000L)
-                        continue
-                    }
-                }
+        var lastTerminalState: String? = null
+        var executionError: String? = null
 
-                // 3. Retry reporting pending outcome if previous transition network call failed
+        try {
+            while (isRunning && currentJobId != null) {
                 pendingOutcome?.let {
                     handleTransition(it)
                     pendingOutcome = null
                     return@let
                 }
 
-                if (currentJobId == null) continue
+                if (currentJobId == null) break
 
-                // 4. Dynamic Server-Configured Execution Limits
                 val maxSteps = currentDag?.get("max_steps")?.asInt ?: 500
                 val timeoutSeconds = currentDag?.get("timeout_seconds")?.asLong ?: 1800L
                 val timeoutMs = timeoutSeconds * 1000L
 
                 if (executedSteps >= maxSteps || (android.os.SystemClock.elapsedRealtime() - jobStartedAt > timeoutMs)) {
                     Log.i(TAG, "Execution reached limits (steps=$executedSteps/$maxSteps, elapsed=${android.os.SystemClock.elapsedRealtime() - jobStartedAt}ms). Stopping runner.")
-                    withContext(Dispatchers.Main) { stop() }
+                    lastTerminalState = "COMPLETED"
                     break
                 }
 
-                // 5. Fetch current DAG state definition
                 val states = currentDag?.getAsJsonObject("states")
                 val currentNode = states?.getAsJsonObject(currentStateId)
 
                 if (currentNode == null) {
-                    Log.e(TAG, "Node $currentStateId not found in DAG. Marking failure.")
-                    handleTransition("FAILURE", error = "Node $currentStateId missing from DAG.")
-                    currentJobId = null
-                    continue
+                    if (currentStateId == "exit" || currentStateId == "TERMINAL_SUCCESS") {
+                        lastTerminalState = "COMPLETED"
+                    } else {
+                        Log.e(TAG, "Node $currentStateId not found in DAG. Marking failure.")
+                        handleTransition("FAILURE", error = "Node $currentStateId missing from DAG.")
+                        lastTerminalState = "FAILED"
+                        executionError = "Node $currentStateId missing from DAG."
+                    }
+                    break
                 }
 
-                val command = currentNode.get("command").asString
+                val command = currentNode.get("command")?.asString ?: "WAIT"
 
                 // Persist execution checkpoint before running the physical action
-                currentJobId?.let { jId ->
-                    currentStateId?.let { sId ->
-                        db.dao.saveCheckpoint(
-                            ExecutionCheckpointEntity(
-                                jobId = jId,
-                                profileId = profileId,
-                                currentStateId = sId,
-                                executedSteps = executedSteps,
-                                lastCommand = command,
-                                status = "RUNNING",
-                                updatedAt = System.currentTimeMillis()
-                            )
-                        )
-                    }
-                }
+                saveCheckpoint(
+                    stateId = currentStateId!!,
+                    stepIndex = executedSteps,
+                    lastCommand = command,
+                    checkpointVersion = currentCheckpointVersion
+                )
 
                 val params = currentNode.getAsJsonObject("params") ?: JsonObject()
                 Log.i(TAG, "Executing step: [$currentStateId] -> Command: $command (step #$executedSteps)")
 
-                // 6. Action Idempotency Check
-                val actionId = "$currentJobId:$currentStateId:$executedSteps"
+                // Action Idempotency Check
+                val actionId = "${execution.executionId}:$currentStateId:$executedSteps"
                 val cachedOutcome = db.dao.getActionOutcome(actionId)
 
                 val outcome = if (cachedOutcome != null) {
@@ -264,7 +258,7 @@ class GhostPilotRunner(
                     db.dao.recordAction(
                         ActionExecutionEntity(
                             actionId = actionId,
-                            jobId = currentJobId!!,
+                            jobId = execution.executionId,
                             stateId = currentStateId!!,
                             command = command,
                             outcome = result,
@@ -276,18 +270,40 @@ class GhostPilotRunner(
 
                 executedSteps++
                 pendingOutcome = outcome
-
-                // 7. Report transition to backend
-                handleTransition(outcome)
+                val reported = reportTransition(outcome)
                 pendingOutcome = null
 
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "Execution loop cycle error: ${e.message}", e)
-                delay(3000L)
+                if (!reported) {
+                    Log.w(TAG, "Transition reporting temporarily unavailable, will retry or continue.")
+                }
+
+                if (currentJobId == null || !isRunning) {
+                    lastTerminalState = if (outcome == "SUCCESS") "COMPLETED" else outcome
+                    break
+                }
             }
+        } catch (e: CancellationException) {
+            lastTerminalState = "CANCELLED"
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Execution error: ${e.message}", e)
+            lastTerminalState = "FAILED"
+            executionError = e.message
+        } finally {
+            heartbeatJob?.cancel()
+            heartbeatJob = null
+            isRunning = false
+            onStateChanged?.invoke(false, null)
         }
+
+        val finalSuccess = lastTerminalState == "COMPLETED" || lastTerminalState == "SUCCESS" || lastTerminalState == "TERMINAL_SUCCESS"
+        return ExecutionResult(
+            success = finalSuccess,
+            executionId = execution.executionId,
+            terminalState = lastTerminalState ?: if (finalSuccess) "COMPLETED" else "FAILED",
+            stepsExecuted = executedSteps,
+            error = executionError
+        )
     }
 
     private suspend fun executeClosedLoopCommand(command: String, params: JsonObject): String {

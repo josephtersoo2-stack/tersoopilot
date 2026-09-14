@@ -345,13 +345,13 @@ class GhostPilotFleetControlTests(TestCase):
         self.assertEqual(resp_term.data["status"], "TERMINAL")
 
     def test_ghostpilot_abort(self):
-        """Test operator abort immediately cancels job and marks FAILED."""
+        """Test operator abort immediately cancels job and marks CANCELLED."""
         resp = self.client.post(f"/api/automation/ghostpilot/{self.job.id}/abort/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.data["status"], "ABORTED")
 
         self.job.refresh_from_db()
-        self.assertEqual(self.job.status, TaskExecutionQueue.ExecutionStatus.FAILED)
+        self.assertEqual(self.job.status, TaskExecutionQueue.ExecutionStatus.CANCELLED)
         self.assertEqual(self.job.error_message, "Task manually aborted by operator.")
         self.assertIsNotNone(self.job.completed_at)
         self.assertTrue(any(log.get("type") == "ABORT" for log in self.job.logs))
@@ -763,7 +763,7 @@ class TersoAssistantEngineTests(TestCase):
         })
         self.assertEqual(result["status"], "ABORTED")
         self.job.refresh_from_db()
-        self.assertEqual(self.job.status, TaskExecutionQueue.ExecutionStatus.FAILED)
+        self.assertEqual(self.job.status, TaskExecutionQueue.ExecutionStatus.CANCELLED)
         self.assertIn("emergency halt", self.job.error_message)
 
     def test_get_job_telemetry_tool(self):
@@ -1605,9 +1605,9 @@ class AutomationV2RestApiTests(TestCase):
         self.assertEqual(res_cancel.status_code, status.HTTP_200_OK)
         self.assertEqual(res_cancel.data["status"], "CANCELLED")
 
-        # Verify pending execution marked FAILED upon run cancellation
+        # Verify pending execution marked CANCELLED upon run cancellation
         res_execs_after = self.client.get(f"/api/automation/runs/{run_id}/executions/")
-        self.assertEqual(res_execs_after.data[0]["status"], "FAILED")
+        self.assertEqual(res_execs_after.data[0]["status"], "CANCELLED")
 
 
 class AutomationV2WatchdogTests(TestCase):

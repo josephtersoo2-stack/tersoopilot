@@ -9,13 +9,6 @@ import retrofit2.http.Path
 import retrofit2.http.Query
 
 interface GhostPilotApiService {
-    @GET("api/automation/ghostpilot/poll/{profile_id}/")
-    suspend fun pollJob(
-        @Path("profile_id") profileId: String,
-        @Query("profile_name") profileName: String? = null,
-        @Query("cloud_sync_id") cloudSyncId: String? = null
-    ): JsonObject
-
     @POST("api/automation/ghostpilot/claim-next/")
     suspend fun claimNext(
         @Body payload: Map<String, @JvmSuppressWildcards Any>
