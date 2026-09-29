@@ -54,19 +54,19 @@ class SavedProfileAdmin(admin.ModelAdmin):
     list_display = ("name", "id", "brand", "model_name", "model_code", "soc", "proxy_type", "created_at")
     search_fields = ("name", "id", "brand", "model_name", "model_code")
     list_filter = ("brand", "proxy_type", "android_version")
-    readonly_fields = ("id", "created_at", "updated_at")
+    readonly_fields = ("id", "cookie_count", "created_at", "updated_at")
     fieldsets = (
         ("Profile Identity & UUID", {
-            "fields": ("id", "name", "brand", "model_name", "model_code")
+            "fields": ("id", "user", "name", "tag", "brand", "model_name", "model_code")
         }),
         ("Hardware & Screen", {
-            "fields": ("soc", "cpu_cores", "ram_gb", "screen_width", "screen_height", "dpr", "webgl_renderer", "webgl_vendor")
+            "fields": ("android_version", "soc", "cpu_cores", "ram_gb", "screen_width", "screen_height", "dpr", "webgl_renderer", "webgl_vendor", "user_agent")
         }),
         ("Network & Proxy", {
-            "fields": ("proxy_type", "proxy_host", "proxy_port", "proxy_username", "proxy_password", "user_agent", "os_fingerprint")
+            "fields": ("proxy_type", "proxy_host", "proxy_port", "proxy_user", "proxy_pass", "web_rtc_mode")
         }),
-        ("Cookies & Session", {
-            "fields": ("cookie_count", "cookies_data")
+        ("Cookies & Session Sync", {
+            "fields": ("cookie_count", "cookies_data", "device_sync_id", "last_used_timestamp")
         }),
         ("Timestamps", {
             "fields": ("created_at", "updated_at"),
