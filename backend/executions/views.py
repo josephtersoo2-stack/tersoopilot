@@ -140,11 +140,11 @@ class GhostPilotExecutionViewSet(viewsets.ReadOnlyModelViewSet):
     Supports polling, state machine transitions, heartbeat liveness, operator aborts,
     AI-driven fallback decision engine, and SSE live telemetry streaming.
     """
-    queryset = Execution.objects.all().order_by("-started_at")
+    queryset = Execution.objects.all().order_by("-created_at")
     serializer_class = ExecutionSerializer
 
     def get_queryset(self):
-        return Execution.objects.filter(profile__in=visible_profiles(self.request.user)).order_by("-started_at")
+        return Execution.objects.filter(profile__in=visible_profiles(self.request.user)).order_by("-created_at")
 
     def _handle_poll(self, request, profile_id):
         profiles = visible_profiles(request.user)

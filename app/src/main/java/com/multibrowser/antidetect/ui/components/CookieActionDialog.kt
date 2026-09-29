@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 fun CookieActionDialog(
     profileId: String,
     profileName: String,
+    engine: com.multibrowser.antidetect.engine.GeckoProfileEngine? = null,
     onDismiss: () -> Unit,
     onCookiesUpdated: (Int) -> Unit
 ) {
@@ -37,9 +38,26 @@ fun CookieActionDialog(
     var cookieContent by remember { mutableStateOf("") }
     var isSyncingBackend by remember { mutableStateOf(false) }
 
-    // Read stored cookies on launch
+    // Read stored cookies on launch: check SQLite first, fallback to Room database
     LaunchedEffect(profileId) {
-        cookieContent = CookieEngine.exportCookiesToJson(context, profileId)
+        val sqliteCookies = CookieEngine.exportCookiesToJson(context, profileId)
+        if (sqliteCookies.isNotBlank() && sqliteCookies != "[]") {
+            cookieContent = sqliteCookies
+        } else {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val db = com.multibrowser.antidetect.data.db.AppDatabase.getDatabase(context)
+                val profile = db.dao.getProfileById(profileId)
+                if (profile != null && profile.cookiesJson.isNotBlank() && profile.cookiesJson != "[]") {
+                    try {
+                        cookieContent = CookieEngine.decryptCookiePayload(profile.cookiesJson)
+                    } catch (_: Exception) {
+                        cookieContent = profile.cookiesJson
+                    }
+                } else {
+                    cookieContent = "[]"
+                }
+            }
+        }
     }
 
     // Native File Exporter (Saves cookies_<profile_name>.json to storage)
@@ -188,29 +206,50 @@ fun CookieActionDialog(
                                 if (cookieContent.isNotBlank()) {
                                     isSyncingBackend = true
 
-                                    // 1. Local SQLite Ingestion
-                                    val localCount = CookieEngine.importCookiesFromJson(context, profileId, cookieContent)
-                                    onCookiesUpdated(localCount)
+                                    coroutineScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                        // 1. Local SQLite Ingestion
+                                        val localCount = CookieEngine.importCookiesFromJson(context, profileId, cookieContent)
 
-                                    // 2. Real-Time Backend Dual-Sync
-                                    coroutineScope.launch {
-                                        val result = CookieSyncDispatcher.syncCookiesToBackend(profileId, cookieContent)
-                                        isSyncingBackend = false
+                                        // 2. Room database persistence
+                                        val db = com.multibrowser.antidetect.data.db.AppDatabase.getDatabase(context)
+                                        val existingProfile = db.dao.getProfileById(profileId)
+                                        val encrypted = CookieEngine.encryptCookiePayload(cookieContent)
+                                        if (existingProfile != null) {
+                                            db.dao.updateSessionData(
+                                                id = profileId,
+                                                cookiesJson = encrypted,
+                                                historyJson = existingProfile.historyJson,
+                                                tabsJson = existingProfile.tabsJson,
+                                                cookieCount = localCount
+                                            )
+                                        }
 
-                                        result.onSuccess { backendCount ->
-                                            Toast.makeText(
-                                                context,
-                                                "Saved locally ($localCount) and synced to backend ($backendCount)!",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                            onDismiss()
-                                        }.onFailure { error ->
-                                            Toast.makeText(
-                                                context,
-                                                "Saved locally, but backend sync failed: ${error.message}",
-                                                Toast.LENGTH_LONG
-                                            ).show()
-                                            onDismiss()
+                                        // 3. Live browser engine injection if running
+                                        engine?.restoreCookies(cookieContent, profileId)
+
+                                        // 4. Real-Time Backend Dual-Sync
+                                        val targetBackendId = existingProfile?.cloudSyncId?.ifBlank { null } ?: profileId
+                                        val result = CookieSyncDispatcher.syncCookiesToBackend(targetBackendId, cookieContent)
+
+                                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                            isSyncingBackend = false
+                                            onCookiesUpdated(localCount)
+
+                                            result.onSuccess { backendCount ->
+                                                Toast.makeText(
+                                                    context,
+                                                    "Saved locally ($localCount) and synced to backend ($backendCount)!",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                                onDismiss()
+                                            }.onFailure { error ->
+                                                Toast.makeText(
+                                                    context,
+                                                    "Saved locally ($localCount), backend notice: ${error.message}",
+                                                    Toast.LENGTH_LONG
+                                                ).show()
+                                                onDismiss()
+                                            }
                                         }
                                     }
                                 } else {

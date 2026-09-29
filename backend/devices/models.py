@@ -47,8 +47,8 @@ class SavedProfile(models.Model):
         # Automatically encrypt proxy_pass if provided in plaintext
         if self.proxy_pass and not self.proxy_pass.startswith(SecretManager.PREFIX):
             self.proxy_pass = SecretManager.encrypt(self.proxy_pass)
-        # Calculate cookie_count if not explicitly set and cookies_data is present
-        if not self.cookie_count and self.cookies_data and self.cookies_data != "[]":
+        # Calculate and keep cookie_count strictly in sync with cookies_data
+        if self.cookies_data and self.cookies_data != "[]":
             try:
                 decrypted = SecretManager.decrypt(self.cookies_data)
                 parsed = json.loads(decrypted)
@@ -56,6 +56,8 @@ class SavedProfile(models.Model):
                     self.cookie_count = len(parsed)
             except Exception:
                 pass
+        elif not self.cookies_data or self.cookies_data == "[]":
+            self.cookie_count = 0
         # Automatically encrypt cookies_data if provided in plaintext
         if self.cookies_data and self.cookies_data != "[]" and not self.cookies_data.startswith(SecretManager.PREFIX):
             self.cookies_data = SecretManager.encrypt(self.cookies_data)
@@ -318,7 +320,7 @@ DEFAULT_AI_PROMPT = (
     "- screen_width (integer, CSS viewport width e.g. 360, 384, 412)\n"
     "- screen_height (integer, CSS viewport height e.g. 800, 854, 915)\n"
     "- dpr (float, device pixel ratio e.g. 2.625, 2.75, 3.0)\n"
-    "- user_agent (string, authentic Mobile Firefox: 'Mozilla/5.0 (Android {android_version}; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0')\n"
+    "- user_agent (string, authentic Mobile Firefox: 'Mozilla/5.0 (Android {android_version}; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0')\n"
     "Output valid JSON only. No markdown formatting, no code blocks, no other text."
 )
 

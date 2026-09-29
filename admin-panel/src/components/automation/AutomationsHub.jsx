@@ -381,6 +381,17 @@ export default function AutomationsHub({ onOpenDispatch }) {
                       <span>Run Now</span>
                     </button>
 
+                    {onOpenDispatch && taskObj?.id && (
+                      <button
+                        onClick={() => onOpenDispatch(taskObj, automation.selection_mode === 'FIXED' ? automation.profile_pool : [])}
+                        className="px-2.5 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 text-xs font-medium flex items-center gap-1 transition-colors"
+                        title="Edit and relaunch this task campaign"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5 text-indigo-400" />
+                        <span>Reuse Task</span>
+                      </button>
+                    )}
+
                     <button
                       onClick={() => handleTogglePause(automation)}
                       className={`px-3 py-1.5 rounded-lg border text-xs font-medium flex items-center gap-1.5 transition-colors ${

@@ -146,6 +146,8 @@ class IPLookupView(APIView):
 
         return Response({"error": "Failed to query IP service"}, status=status.HTTP_502_BAD_GATEWAY)
 
+from django.db import transaction
+
 class SavedProfileViewSet(viewsets.ModelViewSet):
     """
     CRUD endpoints for syncing profiles across cloud and devices.
@@ -159,6 +161,25 @@ class SavedProfileViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+    @action(detail=False, methods=["post"], url_path="bulk-delete")
+    def bulk_delete(self, request):
+        profile_ids = request.data.get("profile_ids", [])
+        if not isinstance(profile_ids, list) or not profile_ids:
+            return Response(
+                {"error": "profile_ids must be a non-empty list of profile IDs."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            profiles_to_delete = self.get_queryset().filter(id__in=profile_ids)
+            deleted_count = profiles_to_delete.count()
+            profiles_to_delete.delete()
+
+        return Response({
+            "status": "SUCCESS",
+            "deleted_count": deleted_count
+        }, status=status.HTTP_200_OK)
 
 
 def get_profile_for_cookies(profile_id, user):
@@ -326,13 +347,19 @@ class DeviceHeartbeatView(APIView):
 
             device.save(update_fields=update_fields)
 
+        from .models import GlobalSetting
+        global_setting = GlobalSetting.load()
+
         return Response({
             "status": "ALIVE",
             "device_id": device.device_id,
             "device_status": device.status,
             "battery_percent": device.battery_percent,
             "last_seen": device.last_seen.isoformat(),
-            "last_heartbeat": device.last_heartbeat.isoformat()
+            "last_heartbeat": device.last_heartbeat.isoformat(),
+            "default_video_resolution": global_setting.default_video_resolution,
+            "max_active_profiles": global_setting.max_active_profiles,
+            "force_global_mute": global_setting.force_global_mute
         }, status=status.HTTP_200_OK)
 
 

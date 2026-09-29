@@ -16,7 +16,8 @@ import {
   Check,
   Zap,
   Globe,
-  Youtube
+  Youtube,
+  RotateCcw
 } from 'lucide-react';
 
 export default function ExecutionConsole({ onOpenDispatch }) {
@@ -87,8 +88,28 @@ export default function ExecutionConsole({ onOpenDispatch }) {
     }
   };
 
+  const handleRelaunch = async (job) => {
+    if (!job) return;
+    try {
+      let taskData = null;
+      if (job.task) {
+        const res = await axios.get(`automation/tasks/${job.task}/`);
+        taskData = res.data;
+      }
+      if (onOpenDispatch) {
+        onOpenDispatch(taskData, job.profile ? [job.profile] : []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch full task details for relaunch:', err);
+      if (onOpenDispatch) {
+        onOpenDispatch({ name: job.task_name || 'Relaunched Task' }, job.profile ? [job.profile] : []);
+      }
+    }
+  };
+
   // Metrics Calculations
   const totalCount = jobs.length;
+  const pendingCount = jobs.filter((j) => j.status === 'PENDING' || j.status === 'DISPATCHED').length;
   const runningCount = jobs.filter((j) => j.status === 'RUNNING').length;
   const successCount = jobs.filter((j) => j.status === 'SUCCESS').length;
   const failedCount = jobs.filter((j) => j.status === 'FAILED' || j.status === 'ABORTED').length;
@@ -96,6 +117,7 @@ export default function ExecutionConsole({ onOpenDispatch }) {
   const filteredJobs = jobs.filter((job) => {
     const matchesStatus = 
       filterStatus === 'ALL' ? true :
+      filterStatus === 'PENDING' ? (job.status === 'PENDING' || job.status === 'DISPATCHED') :
       filterStatus === 'RUNNING' ? job.status === 'RUNNING' :
       filterStatus === 'SUCCESS' ? job.status === 'SUCCESS' :
       filterStatus === 'FAILED' ? (job.status === 'FAILED' || job.status === 'ABORTED') : true;
@@ -111,6 +133,13 @@ export default function ExecutionConsole({ onOpenDispatch }) {
 
   const getStatusBadge = (status) => {
     switch (status) {
+      case 'PENDING':
+      case 'DISPATCHED':
+        return (
+          <span className="flex items-center gap-1 text-[10px] font-semibold text-sky-400 bg-sky-950/50 px-2 py-0.5 rounded-full border border-sky-800">
+            <Clock className="w-3 h-3 animate-pulse" /> Pending Claim
+          </span>
+        );
       case 'RUNNING':
         return (
           <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-400 bg-amber-950/50 px-2 py-0.5 rounded-full border border-amber-800">
@@ -142,7 +171,7 @@ export default function ExecutionConsole({ onOpenDispatch }) {
   return (
     <div className="space-y-6">
       {/* Top Stat Counters Bar */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
         <div className="bg-[#111520] border border-[#1E2638] rounded-2xl p-4 flex items-center justify-between">
           <div>
             <span className="text-[11px] font-medium text-neutral-400">Total Executions</span>
@@ -150,6 +179,19 @@ export default function ExecutionConsole({ onOpenDispatch }) {
           </div>
           <div className="p-2.5 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400">
             <Clock className="w-5 h-5" />
+          </div>
+        </div>
+
+        <div className="bg-[#111520] border border-[#1E2638] rounded-2xl p-4 flex items-center justify-between">
+          <div>
+            <span className="text-[11px] font-medium text-sky-400">Pending Claim</span>
+            <div className="text-2xl font-bold text-sky-400 mt-0.5 flex items-center gap-2">
+              {pendingCount}
+              {pendingCount > 0 && <span className="w-2.5 h-2.5 rounded-full bg-sky-400 animate-pulse" />}
+            </div>
+          </div>
+          <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400">
+            <Radio className="w-5 h-5" />
           </div>
         </div>
 
@@ -208,7 +250,7 @@ export default function ExecutionConsole({ onOpenDispatch }) {
           {/* Filter Pills & Search */}
           <div className="space-y-2.5">
             <div className="flex gap-1.5 p-1 bg-[#0A0D14] rounded-xl border border-[#1E2638] text-[11px]">
-              {['ALL', 'RUNNING', 'SUCCESS', 'FAILED'].map((st) => (
+              {['ALL', 'PENDING', 'RUNNING', 'SUCCESS', 'FAILED'].map((st) => (
                 <button
                   key={st}
                   onClick={() => setFilterStatus(st)}
@@ -283,17 +325,29 @@ export default function ExecutionConsole({ onOpenDispatch }) {
                         Node: <code className="text-cyan-400 font-mono font-semibold bg-[#131722] px-1.5 py-0.5 rounded">{job.current_state_id || 'INIT'}</code>
                       </span>
 
-                      {job.status === 'RUNNING' && (
+                      <div className="flex items-center gap-2">
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleAbort(job.id);
+                            handleRelaunch(job);
                           }}
-                          className="text-rose-400 hover:text-rose-300 font-medium flex items-center gap-1 cursor-pointer"
+                          className="text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1 cursor-pointer transition"
+                          title="Edit parameters and relaunch this task"
                         >
-                          <StopCircle className="w-3 h-3" /> Abort
+                          <RotateCcw className="w-3 h-3" /> Reuse
                         </button>
-                      )}
+                        {job.status === 'RUNNING' && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleAbort(job.id);
+                            }}
+                            className="text-rose-400 hover:text-rose-300 font-medium flex items-center gap-1 cursor-pointer"
+                          >
+                            <StopCircle className="w-3 h-3" /> Abort
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -328,6 +382,19 @@ export default function ExecutionConsole({ onOpenDispatch }) {
                 <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#181E2E] border border-[#232A3E] text-blue-300">
                   {activeState || 'STANDBY'}
                 </span>
+              )}
+
+              {activeJobId && (
+                <button
+                  onClick={() => {
+                    const j = jobs.find((item) => item.id === activeJobId);
+                    if (j) handleRelaunch(j);
+                  }}
+                  className="bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 text-[11px] font-semibold px-2.5 py-1 rounded-lg flex items-center gap-1 cursor-pointer transition"
+                  title="Edit parameters and relaunch this task"
+                >
+                  <RotateCcw className="w-3 h-3" /> Edit & Relaunch
+                </button>
               )}
 
               {jobStatus === 'RUNNING' && (

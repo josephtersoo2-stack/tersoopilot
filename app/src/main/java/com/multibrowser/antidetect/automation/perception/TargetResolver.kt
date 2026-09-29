@@ -13,12 +13,53 @@ class TargetResolver {
     fun resolve(spec: TargetSpec, snapshot: DomSnapshot): ResolvedTarget? {
         val candidates = snapshot.elements.filter { it.enabled }
 
+        // 0.0 Target Video ID Exact/Href Match (Highest Precision for Search & Video Targeting)
+        if (!spec.targetVideoId.isNullOrBlank()) {
+            val vid = spec.targetVideoId
+            val matched = candidates.firstOrNull {
+                it.href != null && (
+                    it.href.contains("v=$vid") ||
+                    it.href.contains("/shorts/$vid") ||
+                    it.href.contains("/embed/$vid") ||
+                    it.href.contains("youtu.be/$vid") ||
+                    it.href.contains(vid)
+                )
+            }
+            if (matched != null) {
+                return ResolvedTarget(matched, isInsideViewport = matched.visible)
+            }
+        }
+
+        // 0. Semantic Action Type Match (Explicit Action Classification: LIKE, SUBSCRIBE, COMMENTS, VIDEO_CARD)
+        if (!spec.actionType.isNullOrBlank()) {
+            val matched = candidates.firstOrNull {
+                it.actionType.equals(spec.actionType, ignoreCase = true)
+            }
+            if (matched != null) {
+                return ResolvedTarget(matched, isInsideViewport = matched.visible)
+            }
+        }
+
+        // 0.1 Href Substring Match (e.g. for video cards containing video ID)
+        if (!spec.hrefContains.isNullOrBlank()) {
+            val raw = spec.hrefContains
+            val videoIdMatch = Regex("(?:v=|/shorts/|/embed/|\\.be/|vi/)([a-zA-Z0-9_-]{11})").find(raw)?.groupValues?.get(1)
+            val searchKey = videoIdMatch ?: raw
+            val matched = candidates.firstOrNull {
+                it.href != null && (it.href.contains(raw, ignoreCase = true) || it.href.contains(searchKey, ignoreCase = true))
+            }
+            if (matched != null) {
+                return ResolvedTarget(matched, isInsideViewport = matched.visible)
+            }
+        }
+
         // 1. Stable DOM Identifier / Selector Match (Highest Stability)
         if (!spec.selector.isNullOrBlank()) {
             val cleanSelector = spec.selector.removePrefix("#").lowercase()
             val matched = candidates.firstOrNull {
                 it.id.lowercase() == cleanSelector ||
-                it.id.equals(spec.selector, ignoreCase = true)
+                it.id.equals(spec.selector, ignoreCase = true) ||
+                (it.href != null && it.href.contains(spec.selector, ignoreCase = true))
             }
             if (matched != null) {
                 return ResolvedTarget(matched, isInsideViewport = matched.visible)
@@ -27,8 +68,18 @@ class TargetResolver {
 
         // 2. Accessibility Label Substring Match (High Stability across i18n & layout)
         if (!spec.ariaLabel.isNullOrBlank()) {
+            val isLikeSpec = spec.ariaLabel.equals("like", ignoreCase = true) || spec.ariaLabel.contains("like this video", ignoreCase = true)
+            val isSubSpec = spec.ariaLabel.contains("subscribe", ignoreCase = true)
             val matched = candidates.firstOrNull {
-                it.ariaLabel?.contains(spec.ariaLabel, ignoreCase = true) == true
+                val candidateAria = it.ariaLabel ?: ""
+                val matches = candidateAria.contains(spec.ariaLabel, ignoreCase = true)
+                if (!matches) return@firstOrNull false
+
+                // Disambiguate Like vs Dislike and Subscribe vs Unsubscribe
+                if (isLikeSpec && candidateAria.contains("dislike", ignoreCase = true)) return@firstOrNull false
+                if (isSubSpec && (candidateAria.contains("unsubscribe", ignoreCase = true) || candidateAria.contains("subscribed", ignoreCase = true))) return@firstOrNull false
+
+                true
             }
             if (matched != null) {
                 return ResolvedTarget(matched, isInsideViewport = matched.visible)

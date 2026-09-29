@@ -45,7 +45,17 @@ fun CreateProfileBottomSheet(
     val coroutineScope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
 
-    var preloadedCookiesRaw by remember { mutableStateOf("") }
+    var preloadedCookiesRaw by remember {
+        mutableStateOf(
+            if (profileToEdit != null && profileToEdit.cookiesJson.isNotBlank() && profileToEdit.cookiesJson != "[]") {
+                try {
+                    CookieEngine.decryptCookiePayload(profileToEdit.cookiesJson)
+                } catch (_: Exception) {
+                    profileToEdit.cookiesJson
+                }
+            } else ""
+        )
+    }
 
     // Native Storage File Picker Contract (.json or .txt)
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -80,7 +90,6 @@ fun CreateProfileBottomSheet(
     var soc by remember { mutableStateOf(profileToEdit?.soc ?: "") }
     var webGlVendor by remember { mutableStateOf(profileToEdit?.webGlVendor ?: "") }
     var webGlRenderer by remember { mutableStateOf(profileToEdit?.webGlRenderer ?: "") }
-    var ramGb by remember { mutableStateOf(profileToEdit?.ramGb?.toString() ?: "") }
     var cpuCores by remember { mutableStateOf(profileToEdit?.cpuCores?.toString() ?: "") }
     var screenWidth by remember { mutableStateOf(profileToEdit?.screenWidth?.toString() ?: "") }
     var screenHeight by remember { mutableStateOf(profileToEdit?.screenHeight?.toString() ?: "") }
@@ -109,7 +118,6 @@ fun CreateProfileBottomSheet(
         s: String,
         vendor: String,
         renderer: String,
-        ram: String,
         cores: String,
         w: String,
         h: String,
@@ -123,7 +131,6 @@ fun CreateProfileBottomSheet(
         soc = s
         webGlVendor = vendor
         webGlRenderer = renderer
-        ramGb = ram
         cpuCores = cores
         screenWidth = w
         screenHeight = h
@@ -145,7 +152,6 @@ fun CreateProfileBottomSheet(
             s = fallback.soc,
             vendor = fallback.webGlVendor,
             renderer = fallback.webGlRenderer,
-            ram = fallback.ramGb.toString(),
             cores = fallback.cpuCores.toString(),
             w = fallback.screenWidth.toString(),
             h = fallback.screenHeight.toString(),
@@ -174,7 +180,6 @@ fun CreateProfileBottomSheet(
                     s = res.soc,
                     vendor = res.webGlVendor,
                     renderer = res.webGlRenderer,
-                    ram = res.ramGb.toString(),
                     cores = res.cpuCores.toString(),
                     w = res.screenWidth.toString(),
                     h = res.screenHeight.toString(),
@@ -183,6 +188,7 @@ fun CreateProfileBottomSheet(
                 )
                 Toast.makeText(context, "Generated specs for ${res.brand} ${res.modelName}", Toast.LENGTH_SHORT).show()
             } catch (e: Exception) {
+                android.util.Log.e("CreateProfile", "Device generation error on ${RetrofitInstance.activeHost}", e)
                 val err = e.localizedMessage ?: e.message ?: "Connection error"
                 Toast.makeText(context, "Generation error: $err", Toast.LENGTH_LONG).show()
             } finally {
@@ -518,7 +524,6 @@ fun CreateProfileBottomSheet(
                                         soc = ""
                                         webGlVendor = ""
                                         webGlRenderer = ""
-                                        ramGb = ""
                                         cpuCores = ""
                                         screenWidth = ""
                                         screenHeight = ""
@@ -655,7 +660,7 @@ fun CreateProfileBottomSheet(
                         )
                     }
 
-                    // 4. WebGL Vendor, RAM & CPU Cores Row
+                    // 4. WebGL Vendor & CPU Cores Row
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -665,17 +670,7 @@ fun CreateProfileBottomSheet(
                             onValueChange = { webGlVendor = it },
                             label = { Text("WebGL Vendor", fontSize = 11.sp) },
                             placeholder = { Text("e.g. ARM, Qualcomm", fontSize = 11.sp) },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true,
-                            shape = RoundedCornerShape(8.dp),
-                            colors = octoTextFieldColors()
-                        )
-                        OutlinedTextField(
-                            value = ramGb,
-                            onValueChange = { ramGb = it },
-                            label = { Text("RAM (GB)", fontSize = 11.sp) },
-                            placeholder = { Text("8, 12, 16", fontSize = 11.sp) },
-                            modifier = Modifier.weight(0.65f),
+                            modifier = Modifier.weight(1.2f),
                             singleLine = true,
                             shape = RoundedCornerShape(8.dp),
                             colors = octoTextFieldColors()
@@ -685,7 +680,7 @@ fun CreateProfileBottomSheet(
                             onValueChange = { cpuCores = it },
                             label = { Text("Cores", fontSize = 11.sp) },
                             placeholder = { Text("8", fontSize = 11.sp) },
-                            modifier = Modifier.weight(0.55f),
+                            modifier = Modifier.weight(0.8f),
                             singleLine = true,
                             shape = RoundedCornerShape(8.dp),
                             colors = octoTextFieldColors()
@@ -741,7 +736,7 @@ fun CreateProfileBottomSheet(
                                 TextButton(
                                     onClick = {
                                         val v = androidVersion.ifBlank { "14" }
-                                        userAgent = "Mozilla/5.0 (Android $v; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
+                                        userAgent = "Mozilla/5.0 (Android $v; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0"
                                     },
                                     contentPadding = PaddingValues(0.dp),
                                     modifier = Modifier.height(20.dp)
@@ -754,7 +749,7 @@ fun CreateProfileBottomSheet(
                         OutlinedTextField(
                             value = userAgent,
                             onValueChange = { userAgent = it },
-                            placeholder = { Text("e.g. Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0", fontSize = 11.sp) },
+                            placeholder = { Text("e.g. Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0", fontSize = 11.sp) },
                             modifier = Modifier.fillMaxWidth(),
                             maxLines = 3,
                             shape = RoundedCornerShape(8.dp),
@@ -996,20 +991,23 @@ fun CreateProfileBottomSheet(
                     val finalName = if (profileName.isBlank()) "$b $m" else profileName.trim()
                     val av = androidVersion.trim().toIntOrNull() ?: 14
                     val finalUa = userAgent.trim().ifBlank {
-                        "Mozilla/5.0 (Android $av; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
+                        "Mozilla/5.0 (Android $av; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0"
                     }
 
                     val profileId = profileToEdit?.id ?: java.util.UUID.randomUUID().toString()
                     var initialCookieCount = profileToEdit?.cookieCount ?: 0
+                    var initialCookiesJson = profileToEdit?.cookiesJson ?: "[]"
 
-                    // Ingest cookies immediately if provided during creation
+                    // Ingest cookies immediately if provided during creation or edit
                     if (preloadedCookiesRaw.isNotBlank()) {
                         val imported = CookieEngine.importCookiesFromJson(context, profileId, preloadedCookiesRaw)
                         initialCookieCount = imported
+                        initialCookiesJson = CookieEngine.encryptCookiePayload(preloadedCookiesRaw)
 
-                        // Real-Time Django REST Backend Sync
+                        // Real-Time Django REST Backend Sync (if profile exists in cloud)
                         coroutineScope.launch {
-                            CookieSyncDispatcher.syncCookiesToBackend(profileId, preloadedCookiesRaw)
+                            val backendTargetId = profileToEdit?.cloudSyncId?.ifBlank { null } ?: profileId
+                            CookieSyncDispatcher.syncCookiesToBackend(backendTargetId, preloadedCookiesRaw)
                         }
                     }
 
@@ -1025,7 +1023,7 @@ fun CreateProfileBottomSheet(
                         soc = soc.trim().ifBlank { "Generic SoC" },
                         webGlVendor = webGlVendor.trim().ifBlank { "ARM" },
                         webGlRenderer = webGlRenderer.trim().ifBlank { "Mali-G57" },
-                        ramGb = ramGb.trim().toIntOrNull() ?: 8,
+                        ramGb = 8,
                         cpuCores = cpuCores.trim().toIntOrNull() ?: 8,
                         screenWidth = screenWidth.trim().toIntOrNull() ?: 360,
                         screenHeight = screenHeight.trim().toIntOrNull() ?: 800,
@@ -1038,6 +1036,8 @@ fun CreateProfileBottomSheet(
                         webRtcMode = webRtcMode,
                         lastUsedTimestamp = profileToEdit?.lastUsedTimestamp ?: 0L,
                         cookieCount = initialCookieCount,
+                        cookiesJson = initialCookiesJson,
+                        cloudSyncId = profileToEdit?.cloudSyncId ?: "",
                         selectedCameraVideoPath = profileToEdit?.selectedCameraVideoPath
                     )
                 }
@@ -1088,7 +1088,6 @@ private data class OfflineSpecs(
     val soc: String,
     val webGlVendor: String,
     val webGlRenderer: String,
-    val ramGb: Int,
     val cpuCores: Int,
     val screenWidth: Int,
     val screenHeight: Int,
@@ -1107,12 +1106,11 @@ private fun getOfflineSpecs(query: String): OfflineSpecs {
             soc = "Unisoc T7300",
             webGlVendor = "ARM",
             webGlRenderer = "Mali-G57 MP2",
-            ramGb = 8,
             cpuCores = 8,
             screenWidth = 360,
             screenHeight = 812,
             dpr = 3.0,
-            userAgent = "Mozilla/5.0 (Android 15; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
+            userAgent = "Mozilla/5.0 (Android 15; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0"
         )
         q.contains("pixel") -> OfflineSpecs(
             brand = "Google",
@@ -1122,12 +1120,11 @@ private fun getOfflineSpecs(query: String): OfflineSpecs {
             soc = "Google Tensor G3",
             webGlVendor = "ARM",
             webGlRenderer = "Mali-G715 Immortalis MC10",
-            ramGb = 12,
             cpuCores = 9,
             screenWidth = 448,
             screenHeight = 998,
             dpr = 3.0,
-            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
+            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0"
         )
         q.contains("galaxy") || q.contains("s24") || q.contains("samsung") -> OfflineSpecs(
             brand = "Samsung",
@@ -1137,12 +1134,11 @@ private fun getOfflineSpecs(query: String): OfflineSpecs {
             soc = "Snapdragon 8 Gen 3 for Galaxy",
             webGlVendor = "Qualcomm",
             webGlRenderer = "Adreno (TM) 750",
-            ramGb = 12,
             cpuCores = 8,
             screenWidth = 412,
             screenHeight = 915,
             dpr = 3.125,
-            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
+            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0"
         )
         q.contains("tecno") || q.contains("camon") -> OfflineSpecs(
             brand = "Tecno",
@@ -1152,12 +1148,11 @@ private fun getOfflineSpecs(query: String): OfflineSpecs {
             soc = "MediaTek Dimensity 8200 Ultimate",
             webGlVendor = "ARM",
             webGlRenderer = "Mali-G610 MC6",
-            ramGb = 12,
             cpuCores = 8,
             screenWidth = 422,
             screenHeight = 927,
             dpr = 3.0,
-            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
+            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0"
         )
         else -> OfflineSpecs(
             brand = "OnePlus",
@@ -1167,12 +1162,11 @@ private fun getOfflineSpecs(query: String): OfflineSpecs {
             soc = "Snapdragon 8 Gen 3",
             webGlVendor = "Qualcomm",
             webGlRenderer = "Adreno (TM) 750",
-            ramGb = 16,
             cpuCores = 8,
             screenWidth = 450,
             screenHeight = 1000,
             dpr = 3.2,
-            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0"
+            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0"
         )
     }
 }

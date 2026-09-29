@@ -13,12 +13,31 @@ object CommandRegistry {
         "WAIT",
         "GROUNDED_CLICK",
         "CLICK",
+        "DYNAMIC_ACTION",
+        "ADDON_STEP",
+        "EXECUTE_SCRIPT",
+        "EVALUATE_JAVASCRIPT",
+        "CUSTOM_ACTION",
+        "DYNAMIC_TAP",
+        "DYNAMIC_SWIPE",
         "YT_TAP_SEARCH_BAR",
         "YT_SUBMIT_SEARCH",
         "SUBMIT_INPUT",
         "YT_CLICK_VIDEO_CARD",
         "YT_ORGANIC_TARGET_SEARCH",
+        "YT_SEARCH_AND_DISCOVER",
+        "SEARCH_TARGET_VIDEO",
+        "VIDEO_SEARCH",
+        "YT_SCROLL_TO_TARGET",
+        "SCROLL_TO_TARGET",
+        "SCROLL_TARGET_VIDEO",
+        "SCROLL_TO_TARGET_VIDEO",
+        "SCROLL_VIDEO",
+        "ORGANIC_SCROLL",
+        "YT_EXPAND_DESCRIPTION",
         "YT_LIKE_VIDEO",
+        "YT_DISLIKE_VIDEO",
+        "YT_SHARE_VIDEO",
         "YT_SUBSCRIBE_CHANNEL",
         "YT_DISMISS_PRE_ROLL_AD",
         "DISMISS_POPUP",
@@ -29,7 +48,19 @@ object CommandRegistry {
         "YT_SCRUB_TIMELINE",
         "YT_SCROLL_TO_COMMENTS",
         "YT_DWELL_ON_COMMENTS",
+        "YT_POST_COMMENT",
         "YT_CLICK_UP_NEXT",
+        "CLICK_LINK",
+        "CLICK_ELEMENT",
+        "SPATIAL_ANCHOR_CLICK",
+        "TYPE_AND_ENTER",
+        "CLICK_AD_IFRAME",
+        "AI_TYPE",
+        "GO_TO_URL",
+        "PAGE_DWELL",
+        "CLICK_INTERNAL_LINK",
+        "SUBMIT_FORM",
+        "SWIPE_VERTICAL",
         "TIER2_FALLBACK",
         "TERMINATE",
         "COMPLETE"
@@ -63,7 +94,15 @@ object CommandRegistry {
             val command = node.get("command")?.asString
                 ?: return ValidationResult.Invalid("State '$stateId' is missing mandatory 'command' field")
 
-            if (!SUPPORTED_COMMANDS.contains(command)) {
+            val isKnownOrDynamic = SUPPORTED_COMMANDS.contains(command) ||
+                command.startsWith("ADDON_") ||
+                command.startsWith("DYNAMIC_") ||
+                command.startsWith("CUSTOM_") ||
+                node.has("script") ||
+                node.has("js") ||
+                node.has("addon_id")
+
+            if (!isKnownOrDynamic) {
                 return ValidationResult.Invalid("State '$stateId' specifies unsupported command: '$command'")
             }
         }

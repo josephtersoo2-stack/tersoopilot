@@ -1,0 +1,27 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div style="max-width: 700px; margin: 20px auto; padding: 24px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
+    <h2 style="margin-top: 0; font-size: 22px; font-weight: 600; color: #111827;">Upload System Update Package (.zip)</h2>
+    <p style="color: #6b7280; font-size: 14px; margin-bottom: 20px;">
+        Upload a hot-patch zip archive just like a WordPress plugin. The system will automatically take an atomic shadow snapshot of any existing files for instant rollback, deploy the changes, and restart the Passenger web server.
+    </p>
+
+    <form method="post" enctype="multipart/form-data">
+        {% csrf_token %}
+        <div style="margin-bottom: 20px; padding: 24px; border: 2px dashed #d1d5db; border-radius: 8px; text-align: center; background: #f9fafb;">
+            <label for="id_patch_file" style="display: block; font-weight: 500; margin-bottom: 10px; color: #374151;">
+                Select .patch.zip or update archive:
+            </label>
+            <input type="file" name="patch_file" id="id_patch_file" accept=".zip" required style="font-size: 14px; margin-bottom: 12px;">
+            <div style="font-size: 12px; color: #9ca3af;">Supported format: .zip archives containing <code>patch.json</code> or <code>manifest.json</code></div>
+        </div>
+
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <a href="../" style="color: #6b7280; text-decoration: none; font-size: 14px;">&larr; Back to Patches</a>
+            <button type="submit" class="button" style="background: #2563eb; color: #ffffff; font-weight: 600; padding: 10px 24px; border-radius: 6px; border: none; cursor: pointer;">
+                Deploy Hot-Patch Now
+            </button>
+        </div>
+    </form>
+</div>
+{% endblock %}

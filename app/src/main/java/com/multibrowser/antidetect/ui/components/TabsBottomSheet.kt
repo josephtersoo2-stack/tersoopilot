@@ -27,13 +27,14 @@ import java.util.UUID
 
 data class BrowserTab(
     val id: String = UUID.randomUUID().toString(),
-    val session: GeckoSession,
+    var session: GeckoSession,
     var title: String = "New Tab",
     var url: String = "https://iphey.com",
     var canGoBack: Boolean = false,
     var canGoForward: Boolean = false,
     var isLoading: Boolean = false,
-    var progress: Float = 0f
+    var progress: Float = 0f,
+    var currentScrollY: Int = 0
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -99,7 +100,10 @@ fun TabsBottomSheet(
 
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     FilledIconButton(
-                        onClick = onNewTab,
+                        onClick = {
+                            onNewTab()
+                            onDismiss()
+                        },
                         colors = IconButtonDefaults.filledIconButtonColors(containerColor = OctoPrimary),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.size(36.dp)
@@ -215,7 +219,10 @@ fun TabsBottomSheet(
 
             // Bottom Full-width New Tab Button
             Button(
-                onClick = onNewTab,
+                onClick = {
+                    onNewTab()
+                    onDismiss()
+                },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 12.dp),

@@ -58,8 +58,9 @@ class RecoveryEngine(
         // 3. Perform bounded scroll-into-view loop
         for (attempt in 1..maxScrollAttempts) {
             val viewport = currentSnapshot.viewport
-            val screenWidth = viewport.width
-            val screenHeight = viewport.height
+            val dpr = if (viewport.dpr > 0f) viewport.dpr else 1.0f
+            val screenWidth = (viewport.width * dpr).takeIf { it > 10f } ?: 720f
+            val screenHeight = (viewport.height * dpr).takeIf { it > 10f } ?: 1280f
 
             // Calculate humanized vertical scroll points centered on device screen
             val startX = screenWidth * 0.5f

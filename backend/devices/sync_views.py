@@ -75,7 +75,14 @@ class AutoSaveSessionView(APIView):
             return Response({"error": "Profile not found to auto-save session."}, status=404)
         fields = {k: v for k, v in data.items() if k in
                   ("cookies_data", "history_data", "tabs_data", "last_used_timestamp")}
+        # Prevent inadvertent wiping of existing authenticated cookies by debounced auto-save
+        if "cookies_data" in fields:
+            raw_c = fields["cookies_data"]
+            if (not raw_c or raw_c == "[]" or raw_c == []) and profile.cookie_count > 0:
+                del fields["cookies_data"]
+
         serializer = SavedProfileSerializer(profile, data=fields, partial=True)
         serializer.is_valid(raise_exception=True)
         profile = serializer.save()
         return Response({"status": "saved", "profile_id": str(profile.id), "cookie_count": profile.cookie_count})
+

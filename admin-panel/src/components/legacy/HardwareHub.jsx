@@ -376,9 +376,12 @@ Output valid JSON only. No markdown formatting, no code blocks, no other text.`;
                 onChange={(e) => handleSettingChange({ default_video_resolution: e.target.value })}
                 className="bg-[#111520] border border-[#232A3E] text-xs font-semibold rounded-lg px-3 py-2 text-white focus:outline-none focus:border-blue-500 cursor-pointer"
               >
-                <option value="240p">240p (Optimal)</option>
                 <option value="144p">144p (Ultra-Light)</option>
+                <option value="240p">240p (Optimal)</option>
                 <option value="360p">360p (Higher CPU)</option>
+                <option value="480p">480p (Standard Definition)</option>
+                <option value="720p">720p (High Definition HD)</option>
+                <option value="1080p">1080p (Full HD)</option>
               </select>
             </div>
           </section>

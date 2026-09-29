@@ -128,7 +128,7 @@ DEFAULT_AI_PROMPT = (
     "- screen_width (integer, CSS viewport width e.g. 360, 384, 412)\n"
     "- screen_height (integer, CSS viewport height e.g. 800, 854, 915)\n"
     "- dpr (float, device pixel ratio e.g. 2.625, 2.75, 3.0)\n"
-    "- user_agent (string, authentic Mobile Firefox: 'Mozilla/5.0 (Android {android_version}; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0')\n"
+    "- user_agent (string, authentic Mobile Firefox: 'Mozilla/5.0 (Android {android_version}; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0')\n"
     "Output valid JSON only. No markdown formatting, no code blocks, no other text."
 )
 

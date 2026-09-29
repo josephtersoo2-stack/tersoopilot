@@ -169,9 +169,12 @@ export default function RuntimeSettingsHub({
             onChange={(e) => handleSettingChange({ default_video_resolution: e.target.value })}
             className="bg-[#111520] border border-[#1E2638] text-xs font-semibold rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 cursor-pointer shrink-0"
           >
-            <option value="240p">240p (Optimal Fleet Quality)</option>
             <option value="144p">144p (Ultra-Light Bandwidth)</option>
-            <option value="360p">360p (Higher Decoder Load)</option>
+            <option value="240p">240p (Optimal Fleet Quality)</option>
+            <option value="360p">360p (Balanced)</option>
+            <option value="480p">480p (Standard Definition)</option>
+            <option value="720p">720p (High Definition HD)</option>
+            <option value="1080p">1080p (Full HD)</option>
           </select>
         </div>
       </div>

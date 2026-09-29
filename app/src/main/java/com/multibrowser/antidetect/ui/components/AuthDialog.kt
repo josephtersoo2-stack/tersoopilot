@@ -436,7 +436,7 @@ fun AuthDialog(
                             onValueChange = {
                                 serverHostInput = it
                             },
-                            placeholder = { Text("https://api.example.com") },
+                            placeholder = { Text(com.multibrowser.antidetect.BuildConfig.API_BASE_URL) },
                             singleLine = true,
                             shape = RoundedCornerShape(8.dp),
                             colors = octoTextFieldColors(),
@@ -456,18 +456,27 @@ fun AuthDialog(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            AssistChip(
-                                onClick = {
-                                    serverHostInput = "http://192.168.1.45:8001/"
-                                },
-                                label = { Text("Wi-Fi: 192.168.1.45", style = MaterialTheme.typography.labelSmall) }
-                            )
-                            AssistChip(
-                                onClick = {
-                                    serverHostInput = "127.0.0.1"
-                                },
-                                label = { Text("USB: 127.0.0.1", style = MaterialTheme.typography.labelSmall) }
-                            )
+                            if (com.multibrowser.antidetect.BuildConfig.DEBUG) {
+                                AssistChip(
+                                    onClick = {
+                                        serverHostInput = "http://10.84.158.87:8001/"
+                                    },
+                                    label = { Text("Wi-Fi: 10.84.158.87", style = MaterialTheme.typography.labelSmall) }
+                                )
+                                AssistChip(
+                                    onClick = {
+                                        serverHostInput = "http://127.0.0.1:8001/"
+                                    },
+                                    label = { Text("USB: 127.0.0.1", style = MaterialTheme.typography.labelSmall) }
+                                )
+                            } else {
+                                AssistChip(
+                                    onClick = {
+                                        serverHostInput = "https://tersoopilotbd.tersoo.name.ng/"
+                                    },
+                                    label = { Text("Namecheap Cloud", style = MaterialTheme.typography.labelSmall) }
+                                )
+                            }
                         }
                     }
                 }

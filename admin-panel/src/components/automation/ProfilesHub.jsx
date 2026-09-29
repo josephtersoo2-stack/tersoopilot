@@ -14,9 +14,11 @@ import {
   Sparkles,
   Layers,
   Clock,
-  Copy
+  Copy,
+  Trash2,
+  AlertTriangle
 } from 'lucide-react';
-import { importProfileCookies, fetchProfiles } from '../../api';
+import { importProfileCookies, fetchProfiles, deleteProfile, bulkDeleteProfiles } from '../../api';
 
 export default function ProfilesHub({
   profiles = [],
@@ -32,6 +34,58 @@ export default function ProfilesHub({
   const [activeProfileForImport, setActiveProfileForImport] = useState(null);
   const [importJsonText, setImportJsonText] = useState('');
   const [isSubmittingImport, setIsSubmittingImport] = useState(false);
+  const [profileToDelete, setProfileToDelete] = useState(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+
+  // Auto-refresh fleet profiles and live cookie counts every 4 seconds
+  React.useEffect(() => {
+    if (!onRefresh) return;
+    onRefresh();
+    const timer = setInterval(() => {
+      onRefresh();
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [onRefresh]);
+
+  const confirmDeleteSingle = async () => {
+    if (!profileToDelete) return;
+    setIsDeleting(true);
+    try {
+      await deleteProfile(profileToDelete.id);
+      if (showNotification) showNotification(`Profile "${profileToDelete.name}" deleted successfully!`);
+      if (setSelectedProfileIds) {
+        setSelectedProfileIds((prev) => prev.filter((id) => id !== profileToDelete.id));
+      }
+      setProfileToDelete(null);
+      const res = await fetchProfiles();
+      setProfiles(res.data);
+    } catch (err) {
+      console.error(err);
+      if (showNotification) showNotification(`Failed to delete profile: ${err.message}`, 'error');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const confirmBulkDelete = async () => {
+    if (selectedProfileIds.length === 0) return;
+    setIsBulkDeleting(true);
+    try {
+      await bulkDeleteProfiles(selectedProfileIds);
+      if (showNotification) showNotification(`Deleted ${selectedProfileIds.length} profiles successfully!`);
+      if (setSelectedProfileIds) setSelectedProfileIds([]);
+      setShowBulkDeleteModal(false);
+      const res = await fetchProfiles();
+      setProfiles(res.data);
+    } catch (err) {
+      console.error(err);
+      if (showNotification) showNotification(`Failed to bulk delete profiles: ${err.message}`, 'error');
+    } finally {
+      setIsBulkDeleting(false);
+    }
+  };
 
   const toggleProfile = (id) => {
     if (!setSelectedProfileIds) return;
@@ -177,6 +231,13 @@ export default function ProfilesHub({
               Clear Selection
             </button>
             <button
+              onClick={() => setShowBulkDeleteModal(true)}
+              className="bg-red-600/15 hover:bg-red-600/25 text-red-400 border border-red-500/30 font-semibold text-xs px-3 py-1.5 rounded-xl flex items-center gap-1.5 transition cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>Delete Selected ({selectedProfileIds.length})</span>
+            </button>
+            <button
               onClick={onOpenAssistant}
               className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold text-xs px-3.5 py-1.5 rounded-xl flex items-center gap-1.5 shadow-md shadow-blue-500/25 transition cursor-pointer"
             >
@@ -225,9 +286,22 @@ export default function ProfilesHub({
                         <p className="text-xs text-neutral-400 mt-0.5">{p.brand} {p.model_name}</p>
                       </div>
                     </div>
-                    <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-semibold font-mono">
-                      {p.cookie_count || 0} cookies
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-semibold font-mono">
+                        {p.cookie_count || 0} cookies
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setProfileToDelete(p);
+                        }}
+                        className="p-1 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg border border-transparent hover:border-red-500/20 transition cursor-pointer"
+                        title={`Delete profile ${p.name}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
 
                   {/* Profile ID Badge with 1-Click Copy */}
@@ -348,6 +422,120 @@ export default function ProfilesHub({
                 className="px-4 py-2 text-xs bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg font-medium cursor-pointer"
               >
                 {isSubmittingImport ? 'Importing...' : 'Save & Overwrite Cookies'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Single Profile Confirmation Modal */}
+      {profileToDelete && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#111520] border border-red-500/30 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5">
+            <div className="flex items-center gap-3 text-red-400">
+              <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/20">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Delete Profile</h3>
+                <p className="text-xs text-neutral-400">This action cannot be undone</p>
+              </div>
+            </div>
+
+            <div className="bg-[#0A0D14] border border-[#1E2638] rounded-xl p-3.5 space-y-1.5 text-xs">
+              <div className="flex justify-between">
+                <span className="text-neutral-400">Profile Name:</span>
+                <span className="text-white font-semibold">{profileToDelete.name}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-neutral-400">Device Model:</span>
+                <span className="text-neutral-300">{profileToDelete.brand} {profileToDelete.model_name}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-neutral-400">Saved Cookies:</span>
+                <span className="text-emerald-400 font-mono">{profileToDelete.cookie_count || 0} cookies</span>
+              </div>
+            </div>
+
+            <p className="text-xs text-neutral-400 leading-relaxed">
+              Deleting this profile will permanently remove its fingerprint, proxy routing, and all associated session cookies from the fleet.
+            </p>
+
+            <div className="flex justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setProfileToDelete(null)}
+                disabled={isDeleting}
+                className="px-4 py-2 text-xs bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-xl transition cursor-pointer font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteSingle}
+                disabled={isDeleting}
+                className="px-4 py-2 text-xs bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white rounded-xl font-semibold transition cursor-pointer flex items-center gap-1.5 shadow-lg shadow-red-600/25"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeleting ? 'Deleting...' : 'Confirm Delete'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Delete Profiles Confirmation Modal */}
+      {showBulkDeleteModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#111520] border border-red-500/30 rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5">
+            <div className="flex items-center gap-3 text-red-400">
+              <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/20">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Delete Selected Profiles</h3>
+                <p className="text-xs text-neutral-400">Permanent fleet deletion</p>
+              </div>
+            </div>
+
+            <div className="bg-[#0A0D14] border border-[#1E2638] rounded-xl p-3.5 space-y-2 text-xs">
+              <div className="flex justify-between items-center">
+                <span className="text-neutral-400">Profiles to delete:</span>
+                <span className="bg-red-500/20 text-red-300 border border-red-500/30 px-2 py-0.5 rounded-full font-mono font-bold">
+                  {selectedProfileIds.length} profiles
+                </span>
+              </div>
+              <div className="max-h-32 overflow-y-auto space-y-1 pt-1 border-t border-[#1E2638]/50">
+                {profiles.filter((p) => selectedProfileIds.includes(p.id)).map((p) => (
+                  <div key={p.id} className="flex justify-between text-[11px] text-neutral-300">
+                    <span className="truncate max-w-[200px]">{p.name}</span>
+                    <span className="text-neutral-500">{p.brand}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <p className="text-xs text-neutral-400 leading-relaxed">
+              Are you sure you want to delete these <strong className="text-white">{selectedProfileIds.length} profiles</strong>? All associated fingerprints and saved cookie sessions will be permanently purged.
+            </p>
+
+            <div className="flex justify-end gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowBulkDeleteModal(false)}
+                disabled={isBulkDeleting}
+                className="px-4 py-2 text-xs bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-xl transition cursor-pointer font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmBulkDelete}
+                disabled={isBulkDeleting}
+                className="px-4 py-2 text-xs bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white rounded-xl font-semibold transition cursor-pointer flex items-center gap-1.5 shadow-lg shadow-red-600/25"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isBulkDeleting ? 'Deleting Profiles...' : `Delete ${selectedProfileIds.length} Profiles`}</span>
               </button>
             </div>
           </div>

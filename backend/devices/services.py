@@ -20,7 +20,7 @@ class DeviceFingerprintSchema(BaseModel):
     soc: str = Field(description="System on Chip chipset name (e.g., Snapdragon 695 5G, Dimensity 8200)")
     webgl_vendor: str = Field(description="ARM for Mali GPUs, Qualcomm for Adreno GPUs")
     webgl_renderer: str = Field(description="Exact GPU string, e.g., Mali-G68 MP5, Adreno (TM) 619")
-    ram_gb: int = Field(description="Memory capacity in GB (e.g., 6, 8, 12)")
+    ram_gb: int = Field(default=8, description="Memory capacity in GB (default 8, genuine Firefox has no deviceMemory API)")
     cpu_cores: int = Field(description="Physical core count, typically 8")
     screen_width: int = Field(description="CSS portrait viewport width (e.g., 384, 393, 412)")
     screen_height: int = Field(description="CSS portrait viewport height (e.g., 854, 873, 915)")
@@ -43,7 +43,7 @@ FALLBACK_DEVICES = {
         "screen_width": 450,
         "screen_height": 1000,
         "dpr": 3.2,
-        "user_agent": "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+        "user_agent": "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0",
     },
     "samsung galaxy s24": {
         "brand": "Samsung",
@@ -58,7 +58,7 @@ FALLBACK_DEVICES = {
         "screen_width": 360,
         "screen_height": 780,
         "dpr": 3.0,
-        "user_agent": "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+        "user_agent": "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0",
     },
     "pixel 8": {
         "brand": "Google",
@@ -73,7 +73,7 @@ FALLBACK_DEVICES = {
         "screen_width": 412,
         "screen_height": 915,
         "dpr": 2.625,
-        "user_agent": "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+        "user_agent": "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0",
     },
     "itel": {
         "brand": "itel",
@@ -88,7 +88,7 @@ FALLBACK_DEVICES = {
         "screen_width": 360,
         "screen_height": 800,
         "dpr": 2.625,
-        "user_agent": "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+        "user_agent": "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0",
     }
 }
 
@@ -112,7 +112,7 @@ def _get_fallback_specs(device_query: str) -> dict:
         "screen_width": 384,
         "screen_height": 854,
         "dpr": 2.8125,
-        "user_agent": "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+        "user_agent": "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0",
     }
 
 
@@ -186,6 +186,15 @@ def _search_web_for_device(device_query: str, target_sites_str: str = None) -> s
     return ""
 
 
+GEMINI_CATALOG_MODELS = [
+    {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "description": "Fast, high-efficiency multimodal model", "context_length": 1048576},
+    {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "description": "High intelligence model for complex reasoning", "context_length": 2097152},
+    {"id": "gemini-2.0-flash", "name": "Gemini 2.0 Flash", "description": "Next generation multimodal model", "context_length": 1048576},
+    {"id": "gemini-1.5-flash", "name": "Gemini 1.5 Flash", "description": "Fast and versatile performance across a wide range of tasks", "context_length": 1048576},
+    {"id": "gemini-1.5-pro", "name": "Gemini 1.5 Pro", "description": "Complex reasoning and analysis", "context_length": 2097152},
+]
+
+
 def fetch_available_models_from_provider(provider: str, api_key: str = None) -> dict:
     """
     Fetches all available models directly from the provider's API.
@@ -213,7 +222,7 @@ def fetch_available_models_from_provider(provider: str, api_key: str = None) -> 
 
         headers = {
             "HTTP-Referer": "https://octobrowser.local",
-            "X-Title": "OctoMobile Anti-Detect",
+            "X-Title": "TersooPilot Anti-Detect",
         }
         if api_key and api_key != "your_openrouter_api_key_here":
             headers["Authorization"] = f"Bearer {api_key}"
@@ -321,7 +330,7 @@ def _call_openrouter(api_key: str, model_name: str, device_query: str, custom_pr
     headers = {
         "Authorization": f"Bearer {api_key}",
         "HTTP-Referer": "https://octobrowser.local",
-        "X-Title": "OctoMobile Anti-Detect",
+        "X-Title": "TersooPilot Anti-Detect",
         "Content-Type": "application/json"
     }
 
@@ -335,7 +344,7 @@ def _call_openrouter(api_key: str, model_name: str, device_query: str, custom_pr
             "soc (string), webgl_vendor (string: 'ARM' for Mali, 'Qualcomm' for Adreno), "
             "webgl_renderer (string, e.g. 'Adreno (TM) 750'), ram_gb (integer), cpu_cores (integer, e.g. 8), "
             "screen_width (integer, CSS viewport e.g. 412), screen_height (integer, CSS viewport e.g. 915), "
-            "dpr (float, e.g. 2.625), user_agent (string, format: 'Mozilla/5.0 (Android {android_version}; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0'). "
+            "dpr (float, e.g. 2.625), user_agent (string, format: 'Mozilla/5.0 (Android {android_version}; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0'). "
             "Output valid JSON only. No markdown formatting, no code blocks, no other text."
         )
 
@@ -400,7 +409,7 @@ def _call_gemini(api_key: str, model_name: str, device_query: str, custom_prompt
             "Generate verified hardware specifications for the target mobile device. "
             "Ensure the GPU renderer, SoC, CSS viewport resolution, DPR, and model code match real-world devices. "
             "The user_agent MUST be an authentic Mobile Firefox on Android string: "
-            "'Mozilla/5.0 (Android {android_version}; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0'."
+            "'Mozilla/5.0 (Android {android_version}; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0'."
         )
 
     target_model = model_name

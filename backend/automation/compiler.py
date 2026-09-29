@@ -321,31 +321,34 @@ class YouTubeCompiler:
         return int(base * (0.8 + (patience * 0.4)))
 
     @classmethod
-    def _inject_engagement_nodes(cls, builder: DAGBuilder, exit_state: str, cfg: Dict[str, Any], persona) -> str:
-        """Injects timeline scrubbing, comment browsing, likes, and subscribes."""
-        last_node = exit_state
+    def _inject_engagement_nodes(
+        cls,
+        builder: DAGBuilder,
+        exit_state: str,
+        cfg: Dict[str, Any],
+        persona,
+        prefix: str = "yt"
+    ) -> str:
+        """Injects timeline scrubbing, likes, subscribes, and comment browsing in human chronological order."""
         patience = getattr(persona, "patience_index", 0.6)
         engagement_rate = getattr(persona, "engagement_rate", 0.15)
+        like_prob = float(cfg.get("like_probability", max(0.45, engagement_rate)))
+        sub_prob = float(cfg.get("subscribe_probability", max(0.25, engagement_rate * 0.8)))
+        enable_comments = cfg.get("enable_comments", True)
+        enable_scrubbing = cfg.get("enable_scrubbing", False)
 
-        # 1. Timeline Micro-Scrubbing (probabilistic rewind)
-        if cfg.get("enable_scrubbing", False) and random.random() < 0.6:
-            scrub_node = f"yt_scrub_{random.randint(100, 999)}"
-            builder.add_node(
-                node_id=scrub_node,
-                command="YT_SCRUB_TIMELINE",
-                params={"rewind_seconds": random.choice([10, 15, 20])},
-                on_success=last_node
-            )
-            last_node = scrub_node
+        # Chronological order: [Scrub] -> [Like] -> [Subscribe] -> [Comments -> Dwell] -> exit_state
+        last_node = exit_state
 
-        # 2. Reading Comments
-        if cfg.get("enable_comments", True):
-            comments_node = f"yt_comments_{random.randint(100, 999)}"
-            dwell_node = f"yt_dwell_comments_{random.randint(100, 999)}"
+        # 4. Reading Comments
+        if enable_comments:
+            uid = random.randint(100, 999)
+            dwell_node = f"{prefix}_dwell_comments_{uid}"
+            comments_node = f"{prefix}_comments_{uid}"
             builder.add_node(
                 node_id=dwell_node,
                 command="YT_DWELL_ON_COMMENTS",
-                params={"dwell_seconds": int(random.randint(6, 15) * patience)},
+                params={"duration_seconds": int(random.randint(6, 15) * patience)},
                 on_success=last_node
             )
             builder.add_node(
@@ -356,10 +359,22 @@ class YouTubeCompiler:
             )
             last_node = comments_node
 
-        # 3. Probabilistic Like
-        like_prob = float(cfg.get("like_probability", engagement_rate))
+        # 3. Probabilistic Subscribe
+        if random.random() < sub_prob:
+            uid = random.randint(100, 999)
+            sub_node = f"{prefix}_sub_{uid}"
+            builder.add_node(
+                node_id=sub_node,
+                command="YT_SUBSCRIBE_CHANNEL",
+                params={},
+                on_success=last_node
+            )
+            last_node = sub_node
+
+        # 2. Probabilistic Like
         if random.random() < like_prob:
-            like_node = f"yt_like_{random.randint(100, 999)}"
+            uid = random.randint(100, 999)
+            like_node = f"{prefix}_like_{uid}"
             builder.add_node(
                 node_id=like_node,
                 command="YT_LIKE_VIDEO",
@@ -368,17 +383,17 @@ class YouTubeCompiler:
             )
             last_node = like_node
 
-        # 4. Probabilistic Subscribe
-        sub_prob = float(cfg.get("subscribe_probability", engagement_rate * 0.5))
-        if random.random() < sub_prob:
-            sub_node = f"yt_sub_{random.randint(100, 999)}"
+        # 1. Timeline Micro-Scrubbing (probabilistic rewind)
+        if enable_scrubbing and random.random() < 0.6:
+            uid = random.randint(100, 999)
+            scrub_node = f"{prefix}_scrub_{uid}"
             builder.add_node(
-                node_id=sub_node,
-                command="YT_SUBSCRIBE_CHANNEL",
-                params={},
+                node_id=scrub_node,
+                command="YT_SCRUB_TIMELINE",
+                params={"rewind_seconds": random.choice([10, 15, 20])},
                 on_success=last_node
             )
-            last_node = sub_node
+            last_node = scrub_node
 
         return last_node
 
@@ -408,13 +423,10 @@ class YouTubeCompiler:
 
         max_scroll_depth = int(cfg.get("max_search_scroll_depth", 10))
 
-        # Base navigation and initial query
+        # Base navigation and direct transition to smart video discovery
         builder.add_node("yt_nav_home", "NAVIGATE", {"url": "https://m.youtube.com"}, "yt_wait_home", extra_transitions={"CONSENT_WALL": "yt_handle_consent"})
         builder.add_node("yt_handle_consent", "DISMISS_POPUP", {"target": "consent"}, "yt_wait_home")
-        builder.add_node("yt_wait_home", "WAIT", {"seconds": random.randint(2, 4)}, "yt_tap_search")
-        builder.add_node("yt_tap_search", "YT_TAP_SEARCH_BAR", {}, "yt_type_query")
-        builder.add_node("yt_type_query", "TYPE_TEXT", {"text": initial_query, "wpm": persona.typing_wpm, "typo_probability": persona.typo_probability}, "yt_submit_search")
-        builder.add_node("yt_submit_search", "YT_SUBMIT_SEARCH", {}, "yt_select_video")
+        builder.add_node("yt_wait_home", "WAIT", {"seconds": random.randint(2, 4)}, "yt_select_video")
 
         # Deep search with multi-keyword fallback and video link/ID targeting
         builder.add_node(
@@ -448,15 +460,15 @@ class YouTubeCompiler:
             extra_transitions={"AD_ACTIVE": "yt_wait_ad_skip", "POPUP_PROMPT": "yt_dismiss_popup"}
         )
         builder.add_node("yt_wait_ad_skip", "YT_DISMISS_PRE_ROLL_AD", {"max_wait_seconds": 15}, "yt_monitor_playback", "yt_monitor_playback")
-        builder.add_node("yt_dismiss_popup", "DISMISS_POPUP", {"target": "app_upsell"}, "yt_monitor_playback", "yt_monitor_playback")
-        builder.add_node("failure_fallback", "TIER2_FALLBACK", {"reason": "YouTube flow stalled or node failed"}, "task_complete", "exit")
+        builder.add_node("yt_dismiss_popup", "DISMISS_POPUP", {"target": "generic"}, "yt_monitor_playback", "yt_monitor_playback")
+        builder.add_node("failure_fallback", "TIER2_FALLBACK", {"reason": "Video search and playback stalled"}, "task_complete", "exit")
         builder.add_node("exit", "TERMINATE", {}, "exit")
 
         return builder.build()
 
 
     # -----------------------------------------------------------------------
-    # Strategy 2: Shorts Infinite Surfing
+    # Strategy 2: Shorts Surfing (Vertical Loop & Binge)
     # -----------------------------------------------------------------------
     @classmethod
     def _compile_shorts_surfing(cls, task: AutomationTask, profile: SavedProfile, cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -464,6 +476,8 @@ class YouTubeCompiler:
         builder = DAGBuilder(entry_state="yt_nav_shorts")
 
         total_shorts = int(cfg.get("shorts_count", 6))
+        like_prob = float(cfg.get("like_probability", 0.35))
+        sub_prob = float(cfg.get("subscribe_probability", 0.15))
 
         builder.add_node("yt_nav_shorts", "NAVIGATE", {"url": "https://m.youtube.com/shorts"}, "yt_wait_first_short")
         builder.add_node("yt_wait_first_short", "WAIT", {"seconds": random.randint(3, 5)}, "short_loop_1")
@@ -476,11 +490,23 @@ class YouTubeCompiler:
             is_engaging = random.random() < 0.6
             dwell_seconds = random.randint(15, 32) if is_engaging else random.randint(3, 7)
 
+            # Probabilistic engagement injection for engaging reels
+            post_watch_target = next_node
+            if is_engaging:
+                if random.random() < like_prob:
+                    like_node = f"short_like_{i}"
+                    builder.add_node(like_node, "YT_LIKE_VIDEO", {}, post_watch_target)
+                    post_watch_target = like_node
+                if random.random() < sub_prob:
+                    sub_node = f"short_sub_{i}"
+                    builder.add_node(sub_node, "YT_SUBSCRIBE_CHANNEL", {}, post_watch_target)
+                    post_watch_target = sub_node
+
             builder.add_node(
                 short_node,
                 "WAIT",
                 {"seconds": dwell_seconds},
-                next_node
+                post_watch_target
             )
 
             if i < total_shorts:
@@ -497,7 +523,7 @@ class YouTubeCompiler:
         return builder.build()
 
     # -----------------------------------------------------------------------
-    # Strategy 3: Algorithmic Rabbit Hole (Up Next Binge)
+    # Strategy 3: Algorithmic Rabbit Hole (Up Next Binge & Organic Feed Browsing)
     # -----------------------------------------------------------------------
     @classmethod
     def _compile_rabbit_hole(cls, task: AutomationTask, profile: SavedProfile, cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -505,32 +531,139 @@ class YouTubeCompiler:
         builder = DAGBuilder(entry_state="yt_nav_home")
 
         depth = int(cfg.get("rabbit_hole_depth", 3))
+
+        # 1. Open YouTube Mobile Home Feed
         builder.add_node("yt_nav_home", "NAVIGATE", {"url": "https://m.youtube.com"}, "yt_wait_home")
-        builder.add_node("yt_wait_home", "WAIT", {"seconds": 3}, "yt_click_initial")
+        builder.add_node("yt_wait_home", "WAIT", {"seconds": random.randint(2, 4)}, "yt_feed_scroll_1")
+
+        # 2. Organically scroll the feed before picking a video (browsing feed like a human)
+        builder.add_node(
+            "yt_feed_scroll_1",
+            "BÉZIER_SWIPE",
+            {"duration_ms": random.randint(550, 750), "direction": "DOWN"},
+            "yt_feed_pause_1"
+        )
+        builder.add_node(
+            "yt_feed_pause_1",
+            "WAIT",
+            {"seconds": random.randint(2, 3)},
+            "yt_feed_scroll_2"
+        )
+        builder.add_node(
+            "yt_feed_scroll_2",
+            "BÉZIER_SWIPE",
+            {"duration_ms": random.randint(550, 750), "direction": "DOWN"},
+            "yt_feed_pause_2"
+        )
+        builder.add_node(
+            "yt_feed_pause_2",
+            "WAIT",
+            {"seconds": random.randint(1, 2)},
+            "yt_click_initial"
+        )
+
+        # 3. Click a video brought into view by the scroll
         builder.add_node(
             "yt_click_initial",
             "YT_CLICK_VIDEO_CARD",
             {
-                "target_index": random.randint(1, 2),
+                "target_index": random.randint(2, 4),
+                "feed_selection": True,
                 "video_format": cfg.get("video_format", "long_form")
             },
             "rabbit_watch_1"
         )
 
+        # 4. Multi-hop Watch & Engagement Loop
         for d in range(1, depth + 1):
             watch_node = f"rabbit_watch_{d}"
-            next_step = f"rabbit_click_next_{d}" if d < depth else "task_complete"
-            dwell = int(random.randint(60, 140) * getattr(persona, "patience_index", 0.6))
+            is_last = (d == depth)
 
-            builder.add_node(watch_node, "WAIT_PLAYBACK", {"duration_seconds": dwell}, next_step)
+            # Determine where to transition after this video's engagement is complete
+            if is_last:
+                next_hop_entry = "task_complete"
+            elif d % 2 == 1:
+                # Hop via recommended / Up-Next videos below player (preserves test assertion)
+                next_hop_entry = f"rabbit_click_next_{d}"
+            else:
+                # Hop via return to main home feed and scroll
+                next_hop_entry = f"rabbit_nav_home_{d}"
 
-            if d < depth:
-                builder.add_node(
-                    next_step,
-                    "YT_CLICK_UP_NEXT",
-                    {"target_index": random.randint(1, 2)},
-                    f"rabbit_watch_{d + 1}"
-                )
+            # Inject human engagement matrix for video d
+            eng_entry = cls._inject_engagement_nodes(
+                builder,
+                exit_state=next_hop_entry,
+                cfg=cfg,
+                persona=persona,
+                prefix=f"rabbit_{d}"
+            )
+
+            min_w = int(cfg.get("min_watch_seconds", 45))
+            max_w = int(cfg.get("max_watch_seconds", 120))
+            patience = getattr(persona, "patience_index", 0.7)
+            dwell = max(30, int(random.randint(min_w, max(min_w + 10, max_w)) * patience))
+
+            builder.add_node(
+                watch_node,
+                "WAIT_PLAYBACK",
+                {"duration_seconds": dwell},
+                eng_entry,
+                extra_transitions={"AD_ACTIVE": f"rabbit_ad_{d}"}
+            )
+            builder.add_node(
+                f"rabbit_ad_{d}",
+                "YT_DISMISS_PRE_ROLL_AD",
+                {"max_wait_seconds": 15},
+                watch_node,
+                watch_node
+            )
+
+            # Define the transition to the next video
+            if not is_last:
+                if d % 2 == 1:
+                    # Up-next recommended click
+                    builder.add_node(
+                        f"rabbit_click_next_{d}",
+                        "YT_CLICK_UP_NEXT",
+                        {"target_index": random.randint(1, 2)},
+                        f"rabbit_watch_{d + 1}"
+                    )
+                else:
+                    # Return to main feed and scroll for the next video
+                    builder.add_node(
+                        f"rabbit_nav_home_{d}",
+                        "NAVIGATE",
+                        {"url": "https://m.youtube.com"},
+                        f"rabbit_wait_home_{d}"
+                    )
+                    builder.add_node(
+                        f"rabbit_wait_home_{d}",
+                        "WAIT",
+                        {"seconds": random.randint(2, 4)},
+                        f"rabbit_scroll_home_{d}"
+                    )
+                    builder.add_node(
+                        f"rabbit_scroll_home_{d}",
+                        "BÉZIER_SWIPE",
+                        {"duration_ms": random.randint(550, 750), "direction": "DOWN"},
+                        f"rabbit_pause_home_{d}"
+                    )
+                    builder.add_node(
+                        f"rabbit_pause_home_{d}",
+                        "WAIT",
+                        {"seconds": random.randint(1, 2)},
+                        f"rabbit_click_feed_{d}"
+                    )
+                    builder.add_node(
+                        f"rabbit_click_feed_{d}",
+                        "YT_CLICK_VIDEO_CARD",
+                        {
+                            "target_index": random.randint(2, 3),
+                            "feed_selection": True,
+                            "video_format": cfg.get("video_format", "long_form")
+                        },
+                        f"rabbit_watch_{d + 1}"
+                    )
 
         builder.add_node("task_complete", "COMPLETE", {"increment_trust_score": 6, "rabbit_hole_depth": depth}, "exit")
         builder.add_node("failure_fallback", "TIER2_FALLBACK", {"reason": "Rabbit hole flow stalled"}, "task_complete", "exit")
@@ -596,11 +729,80 @@ class RecipeCompiler:
     """Master factory routing task compilation to specific platforms."""
     @classmethod
     def compile_recipe(cls, task: AutomationTask, profile: SavedProfile) -> Dict[str, Any]:
+        # 0. Check if task specifies a custom visual workflow
+        cfg = task.config or {}
+        custom_wf_id = cfg.get("custom_workflow_id")
+        if custom_wf_id:
+            from .models import CustomWorkflow
+            cw = CustomWorkflow.objects.filter(id=custom_wf_id).first()
+            if cw:
+                dag = cw.compile_dag(profile)
+                from .validator import DAGValidator
+                DAGValidator.validate(dag)
+                return dag
+
+        if cfg.get("journeys"):
+            from .models import CustomWorkflow
+            cw = CustomWorkflow(name=task.name, journeys=cfg.get("journeys"))
+            dag = cw.compile_dag(profile)
+            from .validator import DAGValidator
+            DAGValidator.validate(dag)
+            return dag
+
+        # 1. Check if a dedicated workflow addon is registered in WorkflowRegistry
+        from .workflows import WorkflowRegistry
+        wf_id = getattr(task, "workflow_type", None) or cfg.get("strategy") or cfg.get("workflow_id")
+        if wf_id:
+            addon = WorkflowRegistry.get(wf_id)
+            if addon:
+                dag = addon.compile_dag(task, profile, cfg)
+                from .validator import DAGValidator
+                DAGValidator.validate(dag)
+                return dag
+
         category = getattr(task, "category", "")
-        if category in [PlatformCategory.WARMING, "WARMING"]:
-            dag = WarmerCompiler.compile(task, profile)
-        elif category in [PlatformCategory.YOUTUBE, "YOUTUBE"]:
+        # If strategy is search_and_target or search_and_discover, route to YouTubeSearchDiscoverAddon
+        if category in [PlatformCategory.YOUTUBE, "YOUTUBE"]:
+            strat = (task.config or {}).get("strategy", "")
+            if strat in ["search_and_target", "search_and_discover", "youtube_search_discover"] or (task.config or {}).get("targets"):
+                addon = WorkflowRegistry.get("youtube_search_discover")
+                if addon:
+                    dag = addon.compile_dag(task, profile, task.config or {})
+                    from .validator import DAGValidator
+                    DAGValidator.validate(dag)
+                    return dag
             dag = YouTubeCompiler.compile(task, profile)
+        elif category in [PlatformCategory.WARMING, "WARMING"]:
+            dag = WarmerCompiler.compile(task, profile)
+        elif category in [PlatformCategory.WEBSITE, "WEBSITE"]:
+            addon = WorkflowRegistry.get("website_organic_traffic")
+            if addon:
+                dag = addon.compile_dag(task, profile, task.config or {})
+                from .validator import DAGValidator
+                DAGValidator.validate(dag)
+                return dag
+            # Fallback simple navigator
+            builder = DAGBuilder(entry_state="nav")
+            config = task.config or {}
+            builder.add_node(
+                node_id="nav",
+                command="NAVIGATE",
+                params={"url": config.get("url", "https://google.com")},
+                on_success="complete"
+            )
+            builder.add_node(
+                node_id="complete",
+                command="COMPLETE",
+                params={},
+                on_success="exit"
+            )
+            builder.add_node(
+                node_id="exit",
+                command="TERMINATE",
+                params={},
+                on_success="exit"
+            )
+            dag = builder.build()
         else:
             # Fallback simple navigator
             builder = DAGBuilder(entry_state="nav")

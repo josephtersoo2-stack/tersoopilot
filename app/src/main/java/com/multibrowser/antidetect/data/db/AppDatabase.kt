@@ -148,7 +148,7 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
             modelName = "Galaxy A54 5G",
             modelCode = "SM-A546B",
             androidVersion = 14,
-            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+            userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0",
             soc = "Exynos 1380",
             webGlVendor = "ARM",
             webGlRenderer = "Mali-G68 MP5",
@@ -455,12 +455,18 @@ class AppDatabase private constructor(context: Context) : SQLiteOpenHelper(
             )
             cursor.use {
                 while (it.moveToNext()) {
+                    val rawUrl = it.getString(it.getColumnIndexOrThrow("url"))
+                    val isAutomationArtifact = rawUrl.contains("the+homeless+billionaire+grandpa") ||
+                            rawUrl.contains("9H3OTeDFN-Y") ||
+                            (rawUrl.contains("youtube.com") && rawUrl.contains("&t="))
+                    val safeUrl = if (isAutomationArtifact || rawUrl.isBlank()) "about:home" else rawUrl
+                    val safeTitle = if (isAutomationArtifact || rawUrl.isBlank()) "New Tab" else it.getString(it.getColumnIndexOrThrow("title"))
                     list.add(
                         SavedTabEntity(
                             id = it.getString(it.getColumnIndexOrThrow("id")),
                             profileId = it.getString(it.getColumnIndexOrThrow("profileId")),
-                            title = it.getString(it.getColumnIndexOrThrow("title")),
-                            url = it.getString(it.getColumnIndexOrThrow("url")),
+                            title = safeTitle,
+                            url = safeUrl,
                             tabOrder = it.getInt(it.getColumnIndexOrThrow("tabOrder")),
                             isCurrentTab = it.getInt(it.getColumnIndexOrThrow("isCurrentTab")) == 1,
                             updatedAt = it.getLong(it.getColumnIndexOrThrow("updatedAt"))

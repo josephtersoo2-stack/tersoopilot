@@ -208,11 +208,11 @@ class DAGCompilerTests(TestCase):
         dag = RecipeCompiler.compile_recipe(task, self.profile)
         states = dag["states"]
         self.assertIn("yt_nav_home", states)
-        self.assertIn("yt_type_query", states)
+        self.assertIn("yt_select_video", states)
         self.assertIn("yt_monitor_playback", states)
 
         # Check persona typing speed was injected
-        typing_params = states["yt_type_query"]["params"]
+        typing_params = states["yt_select_video"]["params"]
         self.assertEqual(typing_params["wpm"], self.profile.persona.typing_wpm)
 
     def test_dispatch_and_transition_flow(self):
@@ -1125,10 +1125,7 @@ class YouTubeStrategyTests(TestCase):
         )
         dag = RecipeCompiler.compile_recipe(task, self.profile)
         states = dag["states"]
-        self.assertIn("yt_type_query", states)
-        # Should only type the FIRST keyword initially
-        self.assertEqual(states["yt_type_query"]["params"]["text"], "build mechanical keyboard")
-
+        self.assertIn("yt_select_video", states)
         # yt_select_video node should contain full candidate list, video ID, and max scroll depth
         select_node = states["yt_select_video"]
         self.assertEqual(select_node["params"]["candidate_keywords"], ["build mechanical keyboard", "budget thock board"])
@@ -2408,4 +2405,102 @@ class AutomationFleetApiTests(TestCase):
         self.assertEqual(resp_en.status_code, 200)
         self.device.refresh_from_db()
         self.assertEqual(self.device.status, "ONLINE")
+
+
+class PlatformCalibrationTests(TestCase):
+    """Tests for YouTube visual spatial anchor calibration and JSON export."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_superuser(username="calib-admin", password="password123")
+        self.client.force_authenticate(self.admin)
+
+    def test_get_default_calibration(self):
+        """Verify GET /api/automation/calibration/ returns canonical anchors on normalized 0..1000 scale."""
+        resp = self.client.get("/api/automation/calibration/?platform=YOUTUBE")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["platform"], "YOUTUBE")
+        anchors = resp.data["anchors"]
+        self.assertIn("SEARCH_BUTTON_HOME", anchors)
+        self.assertIn("SEARCH_BUTTON_HOME", anchors)
+        self.assertIn("SEARCH_BUTTON_WATCH", anchors)
+        self.assertIn("SEARCH_BUTTON_RESULTS", anchors)
+        self.assertIn("SEARCH_INPUT", anchors)
+        self.assertIn("VIDEO_MENU_DOTS", anchors)
+        self.assertIn("COMMENTS_SECTION", anchors)
+        self.assertIn("DESCRIPTION_EXPAND", anchors)
+        self.assertIn("LIKE_BUTTON", anchors)
+        self.assertIn("SUBSCRIBE_BUTTON", anchors)
+        self.assertIn("NAV_HOME", anchors)
+        self.assertIn("NAV_SHORTS", anchors)
+        self.assertIn("NAV_SUBSCRIPTIONS", anchors)
+        self.assertIn("NAV_PROFILE", anchors)
+
+        # Defaults should start empty (None) for user-driven calibration
+        for key, spot in anchors.items():
+            if spot["x"] is not None:
+                self.assertGreaterEqual(spot["x"], 0)
+                self.assertLessEqual(spot["x"], 1000)
+            if spot["y"] is not None:
+                self.assertGreaterEqual(spot["y"], 0)
+                self.assertLessEqual(spot["y"], 1000)
+
+    def test_update_calibration_coordinates(self):
+        """Verify POST /api/automation/calibration/ updates anchor points and settings."""
+        custom_anchors = {
+            "SEARCH_BUTTON_HOME": {"x": 925, "y": 32, "label": "Adjusted Search"},
+            "SEARCH_BUTTON_WATCH": {"x": 890, "y": 45, "label": "Watch Search"},
+            "LIKE_BUTTON": {"x": 215, "y": 455, "label": "Adjusted Like"}
+        }
+        custom_settings = {
+            "initial_scroll_count": 3,
+            "videos_per_batch": 12
+        }
+        post_resp = self.client.post("/api/automation/calibration/", {
+            "platform": "YOUTUBE",
+            "anchors": custom_anchors,
+            "settings": custom_settings
+        }, format="json")
+        self.assertEqual(post_resp.status_code, 200)
+        self.assertEqual(post_resp.data["status"], "SAVED")
+
+        # Verify persisted via GET
+        get_resp = self.client.get("/api/automation/calibration/?platform=YOUTUBE")
+        self.assertEqual(get_resp.status_code, 200)
+        self.assertEqual(get_resp.data["anchors"]["SEARCH_BUTTON_HOME"]["x"], 925)
+        self.assertEqual(get_resp.data["anchors"]["SEARCH_BUTTON_WATCH"]["x"], 890)
+        self.assertEqual(get_resp.data["settings"]["initial_scroll_count"], 3)
+
+    def test_download_calibration_json(self):
+        """Verify GET /api/automation/calibration/download-json/ exports client-ready json."""
+        resp = self.client.get("/api/automation/calibration/download-json/?platform=YOUTUBE")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data["version"], 2)
+        self.assertEqual(resp.data["platform"], "YOUTUBE")
+        self.assertIn("anchors", resp.data)
+        self.assertIn("SEARCH_BUTTON_HOME", resp.data["anchors"])
+        self.assertIn("SEARCH_BUTTON_WATCH", resp.data["anchors"])
+
+    def test_flush_and_import_calibration_json(self):
+        """Verify flush and import endpoints for calibration."""
+        # 1. Import
+        import_payload = {
+            "anchors": {
+                "SEARCH_BUTTON_HOME": {"x": 930, "y": 28},
+                "SEARCH_BUTTON_WATCH": {"x": 910, "y": 35}
+            }
+        }
+        import_resp = self.client.post("/api/automation/calibration/import-json/", import_payload, format="json")
+        self.assertEqual(import_resp.status_code, 200)
+        self.assertEqual(import_resp.data["status"], "IMPORTED")
+        self.assertEqual(import_resp.data["imported_count"], 2)
+
+        # 2. Flush
+        flush_resp = self.client.post("/api/automation/calibration/flush/", {"platform": "YOUTUBE"}, format="json")
+        self.assertEqual(flush_resp.status_code, 200)
+        self.assertEqual(flush_resp.data["status"], "FLUSHED")
+        self.assertIsNone(flush_resp.data["anchors"]["SEARCH_BUTTON_HOME"]["x"])
+        self.assertIsNone(flush_resp.data["anchors"]["SEARCH_BUTTON_WATCH"]["x"])
+
+
 

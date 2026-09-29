@@ -34,8 +34,32 @@ object AuthManager {
         if (prefs == null) {
             prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val savedHost = prefs?.getString(KEY_SERVER_HOST, null)
-            if (!savedHost.isNullOrBlank()) {
-                try { RetrofitInstance.setHost(savedHost, clearCredentials = false) } catch (_: IllegalArgumentException) { logout() }
+            val isLocal = savedHost != null && (
+                savedHost.contains("localhost") || savedHost.contains("127.0.0.1") ||
+                savedHost.contains("192.168.") || savedHost.contains("10.")
+            )
+
+            if (!savedHost.isNullOrBlank() && (com.multibrowser.antidetect.BuildConfig.DEBUG || !isLocal)) {
+                try {
+                    RetrofitInstance.setHost(savedHost, clearCredentials = false)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Invalid saved server host: $savedHost, falling back to default.", e)
+                    try {
+                        RetrofitInstance.setHost(com.multibrowser.antidetect.BuildConfig.API_BASE_URL, clearCredentials = false)
+                    } catch (e2: Exception) {
+                        Log.e(TAG, "Failed to initialize default API_BASE_URL: ${com.multibrowser.antidetect.BuildConfig.API_BASE_URL}", e2)
+                    }
+                }
+            } else {
+                if (isLocal && !com.multibrowser.antidetect.BuildConfig.DEBUG) {
+                    Log.i(TAG, "Purging stale local PC server host in release build. Reverting to production backend.")
+                    prefs?.edit()?.remove(KEY_SERVER_HOST)?.apply()
+                }
+                try {
+                    RetrofitInstance.setHost(com.multibrowser.antidetect.BuildConfig.API_BASE_URL, clearCredentials = false)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to initialize default API_BASE_URL: ${com.multibrowser.antidetect.BuildConfig.API_BASE_URL}", e)
+                }
             }
 
             if (isTokenExpired()) {
@@ -135,7 +159,14 @@ object AuthManager {
     }
 
     fun saveServerHost(host: String) {
-        RetrofitInstance.setHost(host)
+        if (!com.multibrowser.antidetect.BuildConfig.DEBUG) {
+            val lower = host.lowercase()
+            if (lower.contains("localhost") || lower.contains("127.0.0.1") ||
+                lower.contains("192.168.") || lower.contains("10.") || lower.contains("10.0.2.2")) {
+                throw IllegalArgumentException("Release builds must connect to Namecheap production backend (tersoopilotbd.tersoo.name.ng).")
+            }
+        }
+        RetrofitInstance.setHost(host, clearCredentials = false)
         prefs?.edit()?.putString(KEY_SERVER_HOST, RetrofitInstance.activeHost)?.apply()
     }
 }

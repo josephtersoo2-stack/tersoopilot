@@ -6,10 +6,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -30,6 +33,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -48,15 +56,18 @@ import com.multibrowser.antidetect.ui.components.ActiveProfileState
 import com.multibrowser.antidetect.ui.components.ActiveSessionBottomSheet
 import com.multibrowser.antidetect.ui.components.AuthDialog
 import com.multibrowser.antidetect.ui.components.BookmarksBottomSheet
+import com.multibrowser.antidetect.ui.components.BrowserHomeScreen
 import com.multibrowser.antidetect.ui.components.BrowserMenuBottomSheet
 import com.multibrowser.antidetect.ui.components.BrowserTab
 import com.multibrowser.antidetect.ui.components.CookieActionDialog
 import com.multibrowser.antidetect.ui.components.CreateProfileBottomSheet
 import com.multibrowser.antidetect.ui.components.HistoryBottomSheet
 import com.multibrowser.antidetect.ui.components.ProfileSwitcherBottomSheet
+import com.multibrowser.antidetect.ui.components.SpatialCalibrationOverlay
 import com.multibrowser.antidetect.ui.components.TabsBottomSheet
 import com.multibrowser.antidetect.ui.theme.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.multibrowser.antidetect.engine.BrowserCoordinator
@@ -114,9 +125,57 @@ class MainActivity : ComponentActivity() {
         browserCoordinator = BrowserCoordinator(this, db, engine, lifecycleScope)
         AuthManager.init(this)
         ThemeManager.init(this)
+        com.multibrowser.antidetect.automation.perception.AnchorRegistry.init(this)
 
-        if (AuthManager.isLoggedIn.value) {
+        try {
+            val reloadFilter = android.content.IntentFilter("com.multibrowser.antidetect.RELOAD_SPATIAL_ANCHORS")
+            androidx.core.content.ContextCompat.registerReceiver(
+                this,
+                object : android.content.BroadcastReceiver() {
+                    override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+                        android.util.Log.i("MainActivity", "Received RELOAD_SPATIAL_ANCHORS broadcast from control plane.")
+                        com.multibrowser.antidetect.automation.perception.AnchorRegistry.get()?.loadFromFile()
+                    }
+                },
+                reloadFilter,
+                androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+            )
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Failed to register RELOAD_SPATIAL_ANCHORS receiver: ${e.message}")
+        }
+
+        // Always start AutomationWorkerService so device registers with control plane, sends heartbeats, and executes tasks
+        try {
             com.multibrowser.antidetect.automation.AutomationWorkerService.start(this)
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Failed to start AutomationWorkerService: ${e.message}")
+        }
+
+        // Request battery optimization exemption so app and background tabs run continuously without OS suspension
+        try {
+            val powerManager = getSystemService(android.content.Context.POWER_SERVICE) as? android.os.PowerManager
+            if (powerManager != null && !powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                val batteryIntent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = android.net.Uri.parse("package:$packageName")
+                }
+                startActivity(batteryIntent)
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Failed to request battery optimization exemption: ${e.message}")
+        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                try {
+                    val settings = RetrofitInstance.api.getGlobalSettings()
+                    val newRes = settings.defaultVideoResolution.trim()
+                    if (newRes.isNotBlank() && newRes != browserCoordinator.activeVideoResolution) {
+                        withContext(Dispatchers.Main) {
+                            browserCoordinator.broadcastVideoResolution(newRes)
+                        }
+                    }
+                } catch (_: Exception) {}
+                kotlinx.coroutines.delay(3000L)
+            }
         }
 
         handleAutorunIntent(intent)
@@ -128,14 +187,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        browserCoordinator.onResume()
+    }
+
     override fun onPause() {
         super.onPause()
+        browserCoordinator.onPause()
         browserCoordinator.persistAllRunningTabs()
+        browserCoordinator.syncRunningProfilesCookies()
     }
 
     override fun onStop() {
         super.onStop()
         browserCoordinator.persistAllRunningTabs()
+        browserCoordinator.syncRunningProfilesCookies()
     }
 
     override fun onDestroy() {
@@ -168,7 +235,16 @@ class MainActivity : ComponentActivity() {
         val pageProgress = browserCoordinator.pageProgress
         val canGoBackState = browserCoordinator.canGoBackState
         val canGoForwardState = browserCoordinator.canGoForwardState
-        var urlInputText by remember(browserCoordinator.urlInputText) { mutableStateOf(browserCoordinator.urlInputText) }
+        val focusManager = LocalFocusManager.current
+        val urlBarFocusRequester = remember { FocusRequester() }
+        var isUrlBarFocused by remember { mutableStateOf(false) }
+        var urlInputText by remember { mutableStateOf(browserCoordinator.urlInputText) }
+
+        LaunchedEffect(browserCoordinator.urlInputText) {
+            if (!isUrlBarFocused) {
+                urlInputText = browserCoordinator.urlInputText
+            }
+        }
 
         // Sheet and dialog states
         var showCreateSheet by remember { mutableStateOf(false) }
@@ -183,6 +259,7 @@ class MainActivity : ComponentActivity() {
         var showAccountMenuDialog by remember { mutableStateOf(false) }
         var showAuthDialog by remember { mutableStateOf(false) }
         var showBrowserMenuSheet by remember { mutableStateOf(false) }
+        var showSpatialCalibrator by remember { mutableStateOf(false) }
         var showBookmarksSheet by remember { mutableStateOf(false) }
         var showHistorySheet by remember { mutableStateOf(false) }
         var cookieActionProfile by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -254,7 +331,7 @@ class MainActivity : ComponentActivity() {
             browserCoordinator.stopProfile(profileId)
         }
 
-        fun createNewTab(url: String = "https://www.google.com") {
+        fun createNewTab(url: String = "about:home") {
             browserCoordinator.openNewTab(url)
         }
 
@@ -330,7 +407,7 @@ class MainActivity : ComponentActivity() {
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Column {
                                     Text(
-                                        "OctoMobile",
+                                        "TersooPilot",
                                         style = MaterialTheme.typography.titleMedium,
                                         fontWeight = FontWeight.Bold,
                                         color = OctoTextPrimary
@@ -424,25 +501,34 @@ class MainActivity : ComponentActivity() {
                             .statusBarsPadding()
                     ) {
                         // Address Bar Header (Only address bar at top)
+                        // Address Bar Header (Chrome / Firefox style with expanding omnibox, tab counter & 3-dots menu)
                         Surface(
                             color = OctoSurface,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+                            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)) {
                                 Row(
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .animateContentSize(),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     IconButton(
                                         onClick = {
-                                            browserCoordinator.persistAllRunningTabs()
-                                            browserCoordinator.foregroundProfileId = null
+                                            if (isUrlBarFocused) {
+                                                focusManager.clearFocus()
+                                                isUrlBarFocused = false
+                                                urlInputText = browserCoordinator.urlInputText
+                                            } else {
+                                                browserCoordinator.persistAllRunningTabs()
+                                                browserCoordinator.foregroundProfileId = null
+                                            }
                                         },
                                         modifier = Modifier.size(38.dp)
                                     ) {
                                         Icon(
                                             Icons.AutoMirrored.Filled.ArrowBack,
-                                            contentDescription = "Back to profiles overview",
+                                            contentDescription = if (isUrlBarFocused) "Cancel Edit" else "Back to profiles overview",
                                             tint = OctoTextPrimary
                                         )
                                     }
@@ -452,7 +538,12 @@ class MainActivity : ComponentActivity() {
                                     OutlinedTextField(
                                         value = urlInputText,
                                         onValueChange = { urlInputText = it },
-                                        modifier = Modifier.weight(1f),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .focusRequester(urlBarFocusRequester)
+                                            .onFocusChanged { focusState ->
+                                                isUrlBarFocused = focusState.isFocused
+                                            },
                                         singleLine = true,
                                         placeholder = {
                                             Text(
@@ -465,9 +556,9 @@ class MainActivity : ComponentActivity() {
                                         textStyle = MaterialTheme.typography.bodySmall.copy(color = OctoTextPrimary),
                                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
                                         keyboardActions = KeyboardActions(onGo = {
-                                            val target = browserCoordinator.resolveNavigationTarget(urlInputText)
-                                            urlInputText = target
-                                            currentSession.loadUri(target)
+                                            browserCoordinator.navigateToUrl(urlInputText)
+                                            focusManager.clearFocus()
+                                            isUrlBarFocused = false
                                         }),
                                         leadingIcon = {
                                             Icon(
@@ -478,7 +569,7 @@ class MainActivity : ComponentActivity() {
                                             )
                                         },
                                         trailingIcon = {
-                                            if (urlInputText.isNotBlank()) {
+                                            if (isUrlBarFocused && urlInputText.isNotBlank()) {
                                                 IconButton(onClick = { urlInputText = "" }) {
                                                     Icon(
                                                         Icons.Default.Close,
@@ -492,51 +583,46 @@ class MainActivity : ComponentActivity() {
                                         colors = octoElevatedTextFieldColors()
                                     )
 
-                                    Spacer(modifier = Modifier.width(6.dp))
-
-                                    // Dynamic Audio Mute / Unmute Toggle for Active Profile
-                                    foregroundProfileId?.let { fgId ->
-                                        val isMuted = sessionMuteStates[fgId] ?: true
-                                        FilledIconButton(
-                                            onClick = { toggleProfileAudio(fgId) },
-                                            colors = IconButtonDefaults.filledIconButtonColors(
-                                                containerColor = if (isMuted) OctoSurfaceElevated else OctoSuccess.copy(alpha = 0.2f)
-                                            ),
-                                            shape = RoundedCornerShape(12.dp),
-                                            modifier = Modifier.size(42.dp)
+                                    // Tab Counter Badge & 3-Dots Menu (Hides smoothly when Omnibox is expanded/focused)
+                                    AnimatedVisibility(visible = !isUrlBarFocused) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.padding(start = 6.dp)
                                         ) {
-                                            Icon(
-                                                imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                                                contentDescription = if (isMuted) "Unmute Profile Audio" else "Mute Profile Audio",
-                                                tint = if (isMuted) OctoTextMuted else OctoSuccess,
-                                                modifier = Modifier.size(20.dp)
-                                            )
-                                        }
-
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                    }
-
-                                    // Inline Refresh / Stop / Go Button
-                                    FilledIconButton(
-                                        onClick = {
-                                            if (isPageLoading) {
-                                                currentSession.stop()
-                                            } else {
-                                                val target = browserCoordinator.resolveNavigationTarget(urlInputText)
-                                                urlInputText = target
-                                                currentSession.loadUri(target)
+                                            // Tab Counter Badge
+                                            Surface(
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = OctoSurfaceElevated,
+                                                border = BorderStroke(1.2.dp, OctoBorder),
+                                                modifier = Modifier
+                                                    .size(32.dp)
+                                                    .clickable { showTabsSheet = true }
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Text(
+                                                        "${currentTabs.size}",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = OctoTextPrimary
+                                                    )
+                                                }
                                             }
-                                        },
-                                        colors = IconButtonDefaults.filledIconButtonColors(containerColor = OctoPrimary),
-                                        shape = RoundedCornerShape(12.dp),
-                                        modifier = Modifier.size(42.dp)
-                                    ) {
-                                        Icon(
-                                            if (isPageLoading) Icons.Default.Close else Icons.Default.Refresh,
-                                            contentDescription = "Reload",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(18.dp)
-                                        )
+
+                                            Spacer(modifier = Modifier.width(4.dp))
+
+                                            // 3-Dots Menu Button
+                                            IconButton(
+                                                onClick = { showBrowserMenuSheet = true },
+                                                modifier = Modifier.size(36.dp)
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.MoreVert,
+                                                    contentDescription = "Browser Menu",
+                                                    tint = OctoTextPrimary,
+                                                    modifier = Modifier.size(22.dp)
+                                                )
+                                            }
+                                        }
                                     }
                                 }
 
@@ -623,111 +709,126 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        // GeckoView Engine Container
-                        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        // GeckoView & Browser Home Screen Container with Edge Swipe Gestures
+                        val isTabOnStartPage = currentTab == null ||
+                            currentTab.url.isBlank() ||
+                            currentTab.url == "about:blank" ||
+                            currentTab.url == "about:home"
+
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                                .navigationBarsPadding()
+                        ) {
                             AndroidView(
                                 factory = { ctx ->
-                                    GeckoView(ctx).apply {
-                                        activeGeckoView = this
-                                        activeGeckoViewInstance = this
-                                        setSession(currentSession)
+                                    val swipeLayout = object : androidx.swiperefreshlayout.widget.SwipeRefreshLayout(ctx) {
+                                        override fun canChildScrollUp(): Boolean {
+                                            return browserCoordinator.currentScrollY > 0
+                                        }
+                                    }.apply {
+                                        setColorSchemeColors(android.graphics.Color.parseColor("#3B82F6"))
+                                        setProgressBackgroundColorSchemeColor(android.graphics.Color.parseColor("#18181B"))
+                                        setOnRefreshListener {
+                                            browserCoordinator.reloadCurrentTab()
+                                        }
+                                        val gv = GeckoView(ctx).apply {
+                                            tag = "GECKO_VIEW"
+                                            layoutParams = android.view.ViewGroup.LayoutParams(
+                                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                                            )
+                                            activeGeckoView = this
+                                            activeGeckoViewInstance = this
+                                            setSessionSafely(this, currentSession)
+                                        }
+                                        addView(gv)
                                     }
+                                    swipeLayout
                                 },
-                                update = { view ->
-                                    activeGeckoView = view
-                                    activeGeckoViewInstance = view
-                                    if (view.session != currentSession) {
-                                        view.releaseSession()
-                                        setSessionSafely(view, currentSession)
+                                update = { swipeLayout ->
+                                    swipeLayout.visibility = if (isTabOnStartPage) android.view.View.GONE else android.view.View.VISIBLE
+                                    swipeLayout.isRefreshing = isPageLoading
+                                    val gv = swipeLayout.findViewWithTag<GeckoView>("GECKO_VIEW") ?: return@AndroidView
+                                    activeGeckoView = gv
+                                    activeGeckoViewInstance = gv
+                                    if (gv.session != currentSession) {
+                                        gv.releaseSession()
+                                        setSessionSafely(gv, currentSession)
                                     }
                                 },
                                 modifier = Modifier.fillMaxSize()
                             )
-                        }
 
-                        // Bottom Navigation Action Bar - Symmetrical 5-Button Toolbar (Firefox & Chrome Mobile style)
-                        Surface(
-                            color = OctoSurface,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .navigationBarsPadding()
-                        ) {
-                            Row(
+                            if (isTabOnStartPage) {
+                                BrowserHomeScreen(
+                                    activeProfile = activeProfile,
+                                    onNavigate = { target ->
+                                        browserCoordinator.navigateToUrl(target)
+                                    },
+                                    onFocusAddressBar = {
+                                        urlBarFocusRequester.requestFocus()
+                                    },
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+
+                            // Left Edge Swipe: Swiping right navigates Back
+                            var leftEdgeDrag by remember { mutableFloatStateOf(0f) }
+                            Box(
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                                horizontalArrangement = Arrangement.SpaceEvenly,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                // 1. Back
-                                IconButton(
-                                    onClick = { currentSession.goBack() },
-                                    enabled = canGoBackState
-                                ) {
-                                    Icon(
-                                        Icons.AutoMirrored.Filled.ArrowBack,
-                                        contentDescription = "Back",
-                                        tint = if (canGoBackState) OctoTextPrimary else OctoTextMuted.copy(alpha = 0.4f),
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                }
-
-                                // 2. Forward
-                                IconButton(
-                                    onClick = { currentSession.goForward() },
-                                    enabled = canGoForwardState
-                                ) {
-                                    Icon(
-                                        Icons.AutoMirrored.Filled.ArrowForward,
-                                        contentDescription = "Forward",
-                                        tint = if (canGoForwardState) OctoTextPrimary else OctoTextMuted.copy(alpha = 0.4f),
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                }
-
-                                // 3. Home
-                                IconButton(
-                                    onClick = {
-                                        urlInputText = "https://www.google.com"
-                                        currentSession.loadUri("https://www.google.com")
-                                    }
-                                ) {
-                                    Icon(
-                                        Icons.Default.Home,
-                                        contentDescription = "Home",
-                                        tint = OctoTextPrimary,
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                }
-
-                                // 4. Tabs Button (Counter badge)
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
-                                    color = OctoSurfaceElevated,
-                                    border = BorderStroke(1.2.dp, OctoBorder),
-                                    modifier = Modifier
-                                        .size(30.dp)
-                                        .clickable { showTabsSheet = true }
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Text(
-                                            "${currentTabs.size}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = OctoTextPrimary
+                                    .align(Alignment.CenterStart)
+                                    .width(32.dp)
+                                    .fillMaxHeight()
+                                    .pointerInput(canGoBackState) {
+                                        detectHorizontalDragGestures(
+                                            onDragStart = { leftEdgeDrag = 0f },
+                                            onDragEnd = {
+                                                if (leftEdgeDrag > 50f && canGoBackState) {
+                                                    currentSession.goBack()
+                                                }
+                                                leftEdgeDrag = 0f
+                                            },
+                                            onDragCancel = { leftEdgeDrag = 0f },
+                                            onHorizontalDrag = { _, dragAmount ->
+                                                leftEdgeDrag += dragAmount
+                                            }
                                         )
                                     }
-                                }
+                            )
 
-                                // 5. Menu Button (⋮)
-                                IconButton(onClick = { showBrowserMenuSheet = true }) {
-                                    Icon(
-                                        Icons.Default.MoreVert,
-                                        contentDescription = "Browser Menu",
-                                        tint = OctoTextPrimary,
-                                        modifier = Modifier.size(24.dp)
-                                    )
-                                }
+                            // Right Edge Swipe: Swiping left navigates Forward
+                            var rightEdgeDrag by remember { mutableFloatStateOf(0f) }
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.CenterEnd)
+                                    .width(32.dp)
+                                    .fillMaxHeight()
+                                    .pointerInput(canGoForwardState) {
+                                        detectHorizontalDragGestures(
+                                            onDragStart = { rightEdgeDrag = 0f },
+                                            onDragEnd = {
+                                                if (rightEdgeDrag < -50f && canGoForwardState) {
+                                                    currentSession.goForward()
+                                                }
+                                                rightEdgeDrag = 0f
+                                            },
+                                            onDragCancel = { rightEdgeDrag = 0f },
+                                            onHorizontalDrag = { _, dragAmount ->
+                                                rightEdgeDrag += dragAmount
+                                            }
+                                        )
+                                    }
+                            )
+
+                            // Edge gestures: Left/Right swipe for back/forward navigation
+
+                            if (showSpatialCalibrator) {
+                                SpatialCalibrationOverlay(
+                                    targetGeckoView = activeGeckoView ?: activeGeckoViewInstance,
+                                    onDismiss = { showSpatialCalibrator = false }
+                                )
                             }
                         }
                     }
@@ -948,7 +1049,7 @@ class MainActivity : ComponentActivity() {
                     activeTabId = currentActiveProfileState?.activeTabId ?: "",
                     onSelectTab = { switchTab(it) },
                     onCloseTab = { closeTab(it) },
-                    onNewTab = { createNewTab("https://www.google.com") },
+                    onNewTab = { createNewTab("about:home") },
                     onDismiss = { showTabsSheet = false }
                 )
             }
@@ -990,7 +1091,6 @@ class MainActivity : ComponentActivity() {
                 BrowserMenuBottomSheet(
                     activeProfile = activeProfile,
                     isAudioMuted = foregroundProfileId?.let { sessionMuteStates[it] } ?: true,
-                    ghostPilotRunner = currentRunner,
                     onToggleAudio = {
                         foregroundProfileId?.let { toggleProfileAudio(it) }
                     },
@@ -998,14 +1098,14 @@ class MainActivity : ComponentActivity() {
                     onOpenBookmarks = { showBookmarksSheet = true },
                     onOpenHistory = { showHistorySheet = true },
                     onOpenProfileSpecs = { showActiveSheet = true },
-                    onNewTab = { createNewTab("https://www.google.com") },
-                    onReload = { currentSession?.reload() },
+                    onReload = { browserCoordinator.reloadCurrentTab() },
                     onSwitchProfile = { showProfileSwitcherSheet = true },
                     onStopSession = {
                         foregroundProfileId?.let { profId ->
                             profileToStopConfirm = Pair(profId, activeProfile?.name ?: "Current Profile")
                         }
                     },
+                    onOpenSpatialCalibrator = { showSpatialCalibrator = true },
                     onDismiss = { showBrowserMenuSheet = false }
                 )
             }
@@ -1015,8 +1115,7 @@ class MainActivity : ComponentActivity() {
                 BookmarksBottomSheet(
                     currentUrl = urlInputText,
                     onNavigate = { url ->
-                        urlInputText = url
-                        currentSession.loadUri(url)
+                        browserCoordinator.navigateToUrl(url)
                     },
                     onDismiss = { showBookmarksSheet = false }
                 )
@@ -1028,8 +1127,7 @@ class MainActivity : ComponentActivity() {
                 HistoryBottomSheet(
                     historyJson = histJson,
                     onNavigate = { url ->
-                        urlInputText = url
-                        currentSession?.loadUri(url)
+                        browserCoordinator.navigateToUrl(url)
                     },
                     onClearHistory = {
                         foregroundProfileId?.let { profId ->
@@ -1169,6 +1267,9 @@ class MainActivity : ComponentActivity() {
                         Button(
                             onClick = {
                                 showExitAppDialog = false
+                                try {
+                                    com.multibrowser.antidetect.automation.AutomationWorkerService.stop(this@MainActivity)
+                                } catch (_: Exception) {}
                                 finish()
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = OctoPrimary)
@@ -1276,6 +1377,7 @@ class MainActivity : ComponentActivity() {
                 CookieActionDialog(
                     profileId = pId,
                     profileName = pName,
+                    engine = engine,
                     onDismiss = { cookieActionProfile = null },
                     onCookiesUpdated = { count ->
                         Toast.makeText(this@MainActivity, "$count cookies active for $pName", Toast.LENGTH_SHORT).show()
@@ -1501,9 +1603,9 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.weight(1f)
                     ) {
                         Column(modifier = Modifier.padding(6.dp)) {
-                            Text("Memory", style = MaterialTheme.typography.labelSmall, color = OctoTextMuted)
+                            Text("Hardware", style = MaterialTheme.typography.labelSmall, color = OctoTextMuted)
                             Text(
-                                "${profile.ramGb}GB / ${profile.cpuCores}C",
+                                "${profile.cpuCores} Cores • Android ${profile.androidVersion}",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.SemiBold,
                                 color = OctoTextPrimary,

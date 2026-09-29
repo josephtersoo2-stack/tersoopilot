@@ -1,7 +1,7 @@
 import uuid
 import datetime
 import logging
-from django.db import transaction
+from django.db import transaction, models
 from django.utils import timezone
 from devices.models import SavedProfile
 from .models import (
@@ -16,7 +16,7 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 class LeaseService:
-    DEFAULT_LEASE_DURATION_SECONDS = 60
+    DEFAULT_LEASE_DURATION_SECONDS = 180
     DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30
 
     @classmethod
@@ -252,7 +252,21 @@ class ExecutionService:
         """
         Polls the next PENDING execution for a given profile, atomically claiming it (CAS).
         If device_id is provided, automatically records lease association.
+        Guarantees strict single-task per profile execution.
         """
+        # Strict Profile Mutual Exclusion: A profile can only run ONE task at a time.
+        # If any task on this profile is RUNNING or DISPATCHED, all other tasks remain PENDING.
+        active_running = Execution.objects.filter(
+            profile=profile,
+            status__in=[ExecutionStatus.RUNNING, ExecutionStatus.DISPATCHED]
+        ).exists()
+        if active_running:
+            logger.debug(
+                f"Profile '{profile.name}' ({profile.id}) already has an active running/dispatched task. "
+                "Subsequent tasks remain queued in PENDING."
+            )
+            return None
+
         now = timezone.now()
         pending = Execution.objects.filter(
             profile=profile,
@@ -333,6 +347,12 @@ class ExecutionService:
             return {"error": "Execution is already terminal.", "status_code": 409}
 
         states = job.compiled_dag.get("states", {})
+        if job.current_state_id not in states:
+            entry_state = job.entry_state_id or (job.compiled_dag or {}).get("entry_state")
+            if entry_state and entry_state in states:
+                job.current_state_id = entry_state
+                job.save(update_fields=["current_state_id"])
+
         current_node = states.get(job.current_state_id)
 
         if not current_node:
@@ -348,9 +368,12 @@ class ExecutionService:
 
         transitions = current_node.get("transitions", {})
         if outcome not in transitions and outcome != "FAILURE":
-            raise ValidationError({"outcome": "Outcome is not defined for the current state."})
-
-        next_state_id = transitions.get(outcome, transitions.get("FAILURE", "exit"))
+            if outcome in ("ELEMENT_NOT_FOUND", "SKIP", "TIMEOUT", "POPUP_BLOCKED"):
+                next_state_id = transitions.get("FAILURE", transitions.get("SUCCESS", "exit"))
+            else:
+                raise ValidationError({"outcome": "Outcome is not defined for the current state."})
+        else:
+            next_state_id = transitions.get(outcome, transitions.get("FAILURE", "exit"))
         if next_state_id != "exit" and next_state_id not in states:
             raise ValidationError("Transition references a missing state.")
 
@@ -402,6 +425,25 @@ class ExecutionService:
             event_type = ExecutionEventType.STATE_CHANGED
 
         job.save()
+
+        if terminal:
+            # Clean up active leases and free the device
+            try:
+                active_leases = ExecutionLease.objects.filter(execution=job, status=ExecutionLeaseStatus.ACTIVE)
+                for l in active_leases:
+                    LeaseService.release_lease(user=job.profile.user if job.profile else None, lease_id=l.id, device_id=l.device_id)
+            except Exception as e:
+                logger.debug(f"Could not release lease for terminal execution {job.id}: {e}")
+
+            try:
+                from devices.models import Device, DeviceStatus
+                devices = Device.objects.filter(current_execution=job)
+                for dev in devices:
+                    dev.current_execution = None
+                    dev.status = DeviceStatus.ONLINE
+                    dev.save(update_fields=["current_execution", "status", "updated_at"])
+            except Exception as e:
+                logger.debug(f"Could not reset device status for terminal execution {job.id}: {e}")
 
         # Emit time-series execution event
         cls.record_event(
@@ -476,7 +518,7 @@ class ExecutionService:
             job.status = ExecutionStatus.CANCELLED
             job.save(update_fields=["status", "updated_at"])
             ExecutionLease.objects.filter(
-                profile=job.profile,
+                execution=job,
                 status=ExecutionLeaseStatus.ACTIVE
             ).update(status=ExecutionLeaseStatus.RELEASED)
             return {
@@ -489,20 +531,43 @@ class ExecutionService:
                 "status_code": 200
             }
 
-        if device_id:
+        active_lease = None
+        # Locate active lease for this execution job or profile
+        lease_qs = ExecutionLease.objects.filter(
+            execution=job,
+            status=ExecutionLeaseStatus.ACTIVE
+        )
+        if not lease_qs.exists() and job.profile:
             lease_qs = ExecutionLease.objects.filter(
                 profile=job.profile,
-                device_id=device_id,
                 status=ExecutionLeaseStatus.ACTIVE
             )
-            if lease_id:
-                try:
-                    lease_qs = lease_qs.filter(id=uuid.UUID(str(lease_id)))
-                except (ValueError, TypeError):
-                    pass
+        if device_id:
+            dev_qs = lease_qs.filter(device_id=device_id)
+            if dev_qs.exists():
+                lease_qs = dev_qs
+            else:
+                # device_id is provided, but has no active lease for this execution or profile!
+                return {
+                    "action": "LEASE_EXPIRED",
+                    "directive": "LEASE_EXPIRED",
+                    "status": "LEASE_EXPIRED",
+                    "job_id": str(job.id),
+                    "current_state": job.current_state_id,
+                    "job_status": job.status,
+                    "status_code": 410
+                }
+        if lease_id:
+            try:
+                lid_qs = lease_qs.filter(id=uuid.UUID(str(lease_id)))
+                if lid_qs.exists():
+                    lease_qs = lid_qs
+            except (ValueError, TypeError):
+                pass
 
-            active_lease = lease_qs.first()
-            if not active_lease or active_lease.expires_at <= now:
+        active_lease = lease_qs.first()
+        if active_lease:
+            if active_lease.expires_at <= now:
                 return {
                     "action": "LEASE_EXPIRED",
                     "directive": "LEASE_EXPIRED",
@@ -513,13 +578,13 @@ class ExecutionService:
                     "status_code": 410
                 }
 
-            # Refresh lease heartbeat
+            # Refresh lease heartbeat and continuously extend expiry so active running tasks never timeout
             active_lease.heartbeat_at = now
-            if (active_lease.expires_at - now).total_seconds() < 30:
-                active_lease.expires_at = now + timezone.timedelta(seconds=60)
+            active_lease.expires_at = now + timezone.timedelta(seconds=180)
             active_lease.save(update_fields=["heartbeat_at", "expires_at"])
 
-            # Update device telemetry
+        # Update device telemetry
+        if device_id:
             from devices.models import Device
             device_updates = {"last_heartbeat": now}
             if battery_percent is not None:
@@ -604,7 +669,7 @@ class ExecutionService:
 
         # Release associated leases
         ExecutionLease.objects.filter(
-            profile=job.profile,
+            models.Q(execution=job) | models.Q(profile=job.profile),
             status=ExecutionLeaseStatus.ACTIVE
         ).update(status=ExecutionLeaseStatus.RELEASED)
 

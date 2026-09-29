@@ -177,7 +177,9 @@ class WorkerProfileSessionManager(
     suspend fun cleanup(context: WorkerExecutionContext) = withContext(Dispatchers.Main) {
         try {
             context.runner.stop()
-            if (!context.isExternalView) {
+            if (context.isExternalView) {
+                com.multibrowser.antidetect.MainActivity.activeInstance?.browserCoordinator?.resetProfileToStartPage(context.profile.id)
+            } else {
                 sessionPoolManager.closeSession(context.profile.id, context.targetView)
             }
             Log.i(TAG, "Successfully cleaned up worker session for profile ${context.profile.id}")

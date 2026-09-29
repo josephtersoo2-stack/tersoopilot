@@ -21,7 +21,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.multibrowser.antidetect.automation.GhostPilotRunner
 import com.multibrowser.antidetect.data.model.ProfileEntity
 import com.multibrowser.antidetect.network.AuthManager
 import com.multibrowser.antidetect.sync.SyncManager
@@ -33,16 +32,15 @@ import kotlinx.coroutines.launch
 fun BrowserMenuBottomSheet(
     activeProfile: ProfileEntity?,
     isAudioMuted: Boolean = true,
-    ghostPilotRunner: GhostPilotRunner? = null,
     onToggleAudio: () -> Unit = {},
     onOpenAuth: () -> Unit,
     onOpenBookmarks: () -> Unit,
     onOpenHistory: () -> Unit,
     onOpenProfileSpecs: () -> Unit,
-    onNewTab: () -> Unit,
     onReload: () -> Unit,
     onSwitchProfile: () -> Unit,
     onStopSession: () -> Unit,
+    onOpenSpatialCalibrator: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -55,9 +53,6 @@ fun BrowserMenuBottomSheet(
     var showLogoutConfirm by remember { mutableStateOf(false) }
     var showStopConfirm by remember { mutableStateOf(false) }
     var showCookieDialog by remember { mutableStateOf(false) }
-
-    val isAutomationRunning = ghostPilotRunner?.isRunning ?: false
-    val currentStep = ghostPilotRunner?.currentStateId
 
     val scrollState = rememberScrollState()
 
@@ -205,100 +200,7 @@ fun BrowserMenuBottomSheet(
                 }
             }
 
-            // GhostPilot Autonomous Engine Card
-            if (ghostPilotRunner != null) {
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = OctoSurface,
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp,
-                        if (isAutomationRunning) OctoSuccess.copy(alpha = 0.5f) else OctoBorder
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(38.dp)
-                                    .clip(CircleShape)
-                                    .background(if (isAutomationRunning) OctoSuccess.copy(alpha = 0.18f) else OctoSurfaceElevated),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    Icons.Default.SmartToy,
-                                    contentDescription = null,
-                                    tint = if (isAutomationRunning) OctoSuccess else OctoPrimary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            }
-                            Column {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(7.dp)
-                                            .background(
-                                                if (isAutomationRunning) OctoSuccess else OctoTextMuted,
-                                                CircleShape
-                                            )
-                                    )
-                                    Text(
-                                        text = if (isAutomationRunning) {
-                                            "GhostPilot Active" + (if (!currentStep.isNullOrBlank()) " ($currentStep)" else "")
-                                        } else {
-                                            "GhostPilot Automation"
-                                        },
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        color = OctoTextPrimary
-                                    )
-                                }
-                                Text(
-                                    text = if (isAutomationRunning) "Running physical gesture actions" else "Start automated tasks & gestures",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = OctoTextSecondary
-                                )
-                            }
-                        }
-
-                        Button(
-                            onClick = {
-                                if (ghostPilotRunner.isRunning) {
-                                    ghostPilotRunner.stop()
-                                } else {
-                                    ghostPilotRunner.start()
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isAutomationRunning) OctoDanger else OctoPrimary
-                            ),
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
-                        ) {
-                            Text(
-                                text = if (isAutomationRunning) "Pause Pilot" else "Start Pilot",
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
-                            )
-                        }
-                    }
-                }
-            }
-
-            // 2. Horizontal Quick Tools Row (History, Bookmarks, Sync, Specs)
+            // 2. Horizontal Quick Tools Row (History, Bookmarks, Reload, Specs)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -322,22 +224,11 @@ fun BrowserMenuBottomSheet(
                 )
 
                 QuickToolItem(
-                    icon = Icons.Default.CloudSync,
-                    label = "Cloud Sync",
+                    icon = Icons.Default.Refresh,
+                    label = "Reload",
                     onClick = {
-                        if (!isLoggedIn) {
-                            onDismiss()
-                            onOpenAuth()
-                        } else {
-                            coroutineScope.launch {
-                                val res = SyncManager.pullProfilesFromCloud(context)
-                                Toast.makeText(
-                                    context,
-                                    if (res.isSuccess) "Synced: ${res.getOrNull()} profiles active" else "Cloud sync failed",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                        }
+                        onDismiss()
+                        onReload()
                     }
                 )
 
@@ -356,16 +247,6 @@ fun BrowserMenuBottomSheet(
             // 3. Vertical Menu Options
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 MenuRowItem(
-                    icon = Icons.Default.Add,
-                    title = "New Tab",
-                    subtitle = "Open another tab under this profile session",
-                    onClick = {
-                        onDismiss()
-                        onNewTab()
-                    }
-                )
-
-                MenuRowItem(
                     icon = if (isAudioMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
                     title = if (isAudioMuted) "Unmute Profile Audio" else "Mute Profile Audio",
                     subtitle = if (isAudioMuted) "Enable audio for this session (mutes other profiles)" else "Silence audio output for this session",
@@ -376,21 +257,22 @@ fun BrowserMenuBottomSheet(
                 )
 
                 MenuRowItem(
-                    icon = Icons.Default.Refresh,
-                    title = "Reload Page",
-                    subtitle = "Bypass cache and refresh page",
-                    onClick = {
-                        onDismiss()
-                        onReload()
-                    }
-                )
-
-                MenuRowItem(
                     icon = if (isAppInDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
                     title = if (isAppInDarkTheme) "Light Theme" else "Dark Theme",
                     subtitle = if (isAppInDarkTheme) "Switch to clean light mode" else "Switch to sleek dark mode",
                     onClick = {
                         ThemeManager.toggleTheme(context)
+                    }
+                )
+
+                MenuRowItem(
+                    icon = Icons.Default.Adjust,
+                    title = "Spatial Anchor Calibrator",
+                    subtitle = "Calibrate & test UI spots directly on the live webpage",
+                    tint = OctoPrimary,
+                    onClick = {
+                        onDismiss()
+                        onOpenSpatialCalibrator()
                     }
                 )
 

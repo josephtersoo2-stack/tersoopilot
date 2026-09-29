@@ -182,7 +182,11 @@ fun ProfileEntity.toCloudDto(): CloudProfileDto {
         proxyUser = proxyUser,
         proxyPass = proxyPass,
         webRtcMode = webRtcMode,
-        cookiesData = cookiesJson,
+        cookiesData = try {
+            com.multibrowser.antidetect.sync.CookieEngine.decryptCookiePayload(cookiesJson)
+        } catch (_: Exception) {
+            cookiesJson
+        },
         historyData = historyJson,
         tabsData = tabsJson,
         lastUsedTimestamp = lastUsedTimestamp,
@@ -299,6 +303,39 @@ class SafeRetryInterceptor(private val maxRetries: Int = 2) : okhttp3.Intercepto
     }
 }
 
+class DebugHostFallbackInterceptor : okhttp3.Interceptor {
+    override fun intercept(chain: okhttp3.Interceptor.Chain): okhttp3.Response {
+        val request = chain.request()
+        if (!com.multibrowser.antidetect.BuildConfig.DEBUG) {
+            return chain.proceed(request)
+        }
+        val currentHost = request.url.host
+        val fallbackHost = when (currentHost) {
+            "127.0.0.1" -> "10.84.158.87"
+            "10.84.158.87" -> "127.0.0.1"
+            else -> null
+        }
+        return try {
+            chain.proceed(request)
+        } catch (e: java.io.IOException) {
+            if (fallbackHost != null && (e is java.net.ConnectException || e is java.net.SocketTimeoutException)) {
+                android.util.Log.w("RetrofitInstance", "Host $currentHost unreachable ($e). Trying fallback host $fallbackHost:8001")
+                val fallbackUrl = request.url.newBuilder().host(fallbackHost).build()
+                val fallbackRequest = request.newBuilder().url(fallbackUrl).build()
+                try {
+                    val response = chain.proceed(fallbackRequest)
+                    if (response.isSuccessful || response.code < 500) {
+                        return response
+                    }
+                } catch (fallbackEx: Exception) {
+                    android.util.Log.w("RetrofitInstance", "Fallback to $fallbackHost failed: ${fallbackEx.message}")
+                }
+            }
+            throw e
+        }
+    }
+}
+
 object RetrofitInstance {
     @Volatile
     private var endpoint = com.multibrowser.antidetect.BuildConfig.API_BASE_URL
@@ -317,13 +354,28 @@ object RetrofitInstance {
     @Synchronized
     fun setHost(host: String, clearCredentials: Boolean = true) {
         val value = host.trim().trimEnd('/')
-        val candidate = if (value.contains("://")) value else {
+        val isIpOrLocal = value.startsWith("192.168.") || value.startsWith("10.") ||
+                value.startsWith("127.0.0.1") || value.startsWith("localhost") ||
+                value.matches(Regex("""^(http://|https://)?\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$"""))
+
+        if (!com.multibrowser.antidetect.BuildConfig.DEBUG && isIpOrLocal) {
+            throw IllegalArgumentException("Connecting to local host or IP addresses is disabled in release builds.")
+        }
+
+        val candidate = if (value.contains("://")) {
+            value
+        } else if (isIpOrLocal) {
+            val withPort = if (value.contains(":")) value else "$value:8001"
+            "http://$withPort"
+        } else {
             if (com.multibrowser.antidetect.BuildConfig.DEBUG) "http://$value:8001" else "https://$value"
         }
         val url = candidate.toHttpUrl()
         require(url.username.isEmpty() && url.password.isEmpty()) { "Credentials are not allowed in server URLs." }
         require(url.query == null && url.fragment == null && url.encodedPath == "/") { "Use a server origin without a path or query." }
-        require(com.multibrowser.antidetect.BuildConfig.DEBUG || url.isHttps) { "HTTPS is required in release builds." }
+        if (!com.multibrowser.antidetect.BuildConfig.DEBUG && !url.isHttps && !isIpOrLocal) {
+            android.util.Log.w("RetrofitInstance", "Notice: Connecting over plain HTTP to remote host: ${url.host}")
+        }
         val normalized = url.toString()
         if (endpoint != normalized) {
             // An account token belongs to one server, never forward it after a server change.
@@ -346,6 +398,7 @@ object RetrofitInstance {
                 }
                 val clientEndpoint = endpoint
                 val clientBuilder = OkHttpClient.Builder()
+                    .addInterceptor(DebugHostFallbackInterceptor())
                     .addInterceptor { chain ->
                         check(clientEndpoint == endpoint) { "Server changed; recreate the API client." }
                         val request = chain.request().newBuilder()

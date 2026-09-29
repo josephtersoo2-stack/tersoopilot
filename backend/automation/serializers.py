@@ -11,6 +11,8 @@ from .models import (
     AssistantMessage,
     Automation,
     AutomationRun,
+    CustomWorkflow,
+    WorkflowAddon,
 )
 
 class NicheSerializer(serializers.ModelSerializer):
@@ -38,6 +40,7 @@ class AutomationTaskSerializer(serializers.ModelSerializer):
     class Meta:
         model = AutomationTask
         fields = "__all__"
+        read_only_fields = ["id", "owner", "created_at"]
 
     def validate_config(self, value):
         if not isinstance(value, dict):
@@ -93,5 +96,46 @@ class AutomationRunSerializer(serializers.ModelSerializer):
     class Meta:
         model = AutomationRun
         fields = "__all__"
+
+
+class CustomWorkflowSerializer(serializers.ModelSerializer):
+    journeys_count = serializers.SerializerMethodField()
+    steps_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CustomWorkflow
+        fields = "__all__"
+
+    def get_journeys_count(self, obj):
+        return len(obj.journeys or [])
+
+    def get_steps_count(self, obj):
+        total = 0
+        for j in (obj.journeys or []):
+            total += len(j.get("steps") or [])
+        return total
+
+
+class WorkflowAddonSerializer(serializers.ModelSerializer):
+    steps_count = serializers.SerializerMethodField()
+    templates_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WorkflowAddon
+        fields = [
+            "id", "slug", "name", "version", "category", "platform",
+            "author", "description", "icon", "is_active", "manifest",
+            "steps_count", "templates_count", "created_at", "updated_at"
+        ]
+
+    def get_steps_count(self, obj):
+        manifest = obj.manifest or {}
+        return len(manifest.get("steps") or [])
+
+    def get_templates_count(self, obj):
+        manifest = obj.manifest or {}
+        return len(manifest.get("templates") or [])
+
+
 
 

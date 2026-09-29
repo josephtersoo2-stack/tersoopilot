@@ -10,10 +10,15 @@ import TersoAssistantHub from './components/automation/TersoAssistantHub';
 import FloatingAssistant from './components/automation/FloatingAssistant';
 import HardwareBlueprintHub from './components/hardware/HardwareBlueprintHub';
 import RuntimeSettingsHub from './components/system/RuntimeSettingsHub';
+import SystemUpdatesHub from './components/system/SystemUpdatesHub';
 import PersonaModal from './components/automation/PersonaModal';
 import TaskDispatchModal from './components/automation/TaskDispatchModal';
 import AutomationsHub from './components/automation/AutomationsHub';
 import FleetMonitorHub from './components/automation/FleetMonitorHub';
+import CalibrationHub from './components/automation/CalibrationHub';
+import WorkflowBuilderHub from './components/automation/WorkflowBuilderHub';
+import LaunchCampaignHub from './components/automation/LaunchCampaignHub';
+import AddonsHub from './components/automation/AddonsHub';
 import { fetchGlobalSettings } from './api';
 
 export default function App({ onLogout }) {
@@ -34,6 +39,15 @@ export default function App({ onLogout }) {
   const [selectedProfileIds, setSelectedProfileIds] = useState([]);
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
   const [showDispatchModal, setShowDispatchModal] = useState(false);
+  const [relaunchTask, setRelaunchTask] = useState(null);
+  const [relaunchProfileIds, setRelaunchProfileIds] = useState([]);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  const handleOpenDispatch = (task = null, profileIds = []) => {
+    setRelaunchTask(task);
+    setRelaunchProfileIds(profileIds || []);
+    setShowDispatchModal(true);
+  };
   const [statusMsg, setStatusMsg] = useState('');
   const [statusType, setStatusType] = useState('success');
   const [loading, setLoading] = useState(true);
@@ -103,21 +117,37 @@ export default function App({ onLogout }) {
   }
 
   return (
-    <div className="flex min-h-screen bg-[#0A0D14] text-neutral-100 font-sans antialiased selection:bg-blue-600 selection:text-white">
-      {/* 1. Fixed Left Sidebar Navigation */}
+    <div className="flex min-h-screen bg-[#0A0D14] text-neutral-100 font-sans antialiased selection:bg-blue-600 selection:text-white relative">
+      {/* Mobile Drawer Backdrop */}
+      {isMobileMenuOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm lg:hidden transition-opacity"
+          onClick={() => setIsMobileMenuOpen(false)}
+        />
+      )}
+
+      {/* 1. Responsive Sidebar Navigation (Docked on desktop, Drawer on mobile) */}
       <Sidebar
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        onOpenDispatch={() => setShowDispatchModal(true)}
+        setActiveTab={(tab) => {
+          setActiveTab(tab);
+          setIsMobileMenuOpen(false);
+        }}
+        onOpenDispatch={() => {
+          setActiveTab('LAUNCH');
+          setIsMobileMenuOpen(false);
+        }}
         profilesCount={profiles.length}
         runningJobsCount={runningJobsCount}
         activeModelName={settings.selected_ai_model}
         isAudioMuted={settings.force_global_mute}
+        isMobileOpen={isMobileMenuOpen}
+        onCloseMobile={() => setIsMobileMenuOpen(false)}
+        onLogout={onLogout}
       />
 
       {/* 2. Main Content Workspace */}
       <div className="flex-1 flex flex-col min-w-0 overflow-x-hidden">
-        <div className="flex justify-end px-8 pt-3"><button onClick={onLogout} className="text-sm text-neutral-300 hover:text-white">Sign out</button></div>
         {/* Top Header Bar */}
         <TopBar
           activeTab={activeTab}
@@ -126,13 +156,40 @@ export default function App({ onLogout }) {
           onRefresh={loadDashboardData}
           statusMsg={statusMsg}
           statusType={statusType}
-          onOpenDispatch={() => setShowDispatchModal(true)}
+          onOpenDispatch={() => setActiveTab('LAUNCH')}
+          onToggleMobileMenu={() => setIsMobileMenuOpen((prev) => !prev)}
+          onLogout={onLogout}
         />
 
         {/* Dynamic View Panels */}
-        <main className="p-8 max-w-7xl w-full mx-auto flex-1">
-          {activeTab === 'AUTOMATIONS' && (
-            <AutomationsHub onOpenDispatch={() => setShowDispatchModal(true)} />
+        {activeTab === 'WORKFLOW_BUILDER' || activeTab === 'LAUNCH' ? (
+          <main className="w-full flex-1 flex flex-col overflow-hidden">
+            {activeTab === 'WORKFLOW_BUILDER' && <WorkflowBuilderHub onNotification={showNotification} />}
+            {activeTab === 'LAUNCH' && (
+              <LaunchCampaignHub
+                onDispatched={() => {
+                  setActiveTab('EXECUTION');
+                  loadProfiles();
+                  pollRunningJobs();
+                }}
+              />
+            )}
+          </main>
+        ) : (
+          <main className="p-3.5 sm:p-5 lg:p-8 max-w-7xl w-full mx-auto flex-1 min-w-0">
+            {activeTab === 'ADDONS' && (
+              <AddonsHub
+                onNotification={showNotification}
+                onNavigateToWorkflow={() => setActiveTab('WORKFLOW_BUILDER')}
+              />
+            )}
+
+            {activeTab === 'AUTOMATIONS' && (
+              <AutomationsHub onOpenDispatch={(task, pIds) => handleOpenDispatch(task, pIds)} />
+            )}
+
+          {activeTab === 'CALIBRATION' && (
+            <CalibrationHub onNotification={showNotification} />
           )}
 
           {activeTab === 'FLEET' && (
@@ -140,7 +197,7 @@ export default function App({ onLogout }) {
           )}
 
           {activeTab === 'EXECUTION' && (
-            <ExecutionConsole onOpenDispatch={() => setShowDispatchModal(true)} />
+            <ExecutionConsole onOpenDispatch={(task, pIds) => handleOpenDispatch(task, pIds)} />
           )}
 
           {activeTab === 'PROFILES' && (
@@ -184,7 +241,12 @@ export default function App({ onLogout }) {
               showNotification={showNotification}
             />
           )}
+
+          {activeTab === 'UPDATES' && (
+            <SystemUpdatesHub showNotification={showNotification} />
+          )}
         </main>
+      )}
       </div>
 
       {/* Global Floating Context-Aware AI Copilot (Appears Everywhere) */}
@@ -211,11 +273,19 @@ export default function App({ onLogout }) {
       {showDispatchModal && (
         <TaskDispatchModal
           profiles={profiles}
-          onClose={() => setShowDispatchModal(false)}
+          initialTask={relaunchTask}
+          initialProfileIds={relaunchProfileIds}
+          onClose={() => {
+            setShowDispatchModal(false);
+            setRelaunchTask(null);
+            setRelaunchProfileIds([]);
+          }}
           onDispatched={() => {
             setActiveTab('EXECUTION');
             loadProfiles();
             pollRunningJobs();
+            setRelaunchTask(null);
+            setRelaunchProfileIds([]);
           }}
         />
       )}

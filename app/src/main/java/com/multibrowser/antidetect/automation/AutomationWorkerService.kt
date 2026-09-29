@@ -47,8 +47,9 @@ class AutomationWorkerService : Service() {
         WorkerProfileSessionManager(this@AutomationWorkerService)
     }
 
-    private var activeJobId: String? = null
-    private var activeProfileName: String? = null
+    private val runningExecutions = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val activeExecutionNames = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val activeContexts = java.util.concurrent.ConcurrentHashMap<String, WorkerExecutionContext>()
 
     override fun onCreate() {
         super.onCreate()
@@ -80,6 +81,11 @@ class AutomationWorkerService : Service() {
 
         workerJob = serviceScope.launch {
             registerDeviceWithControlPlane()
+            try {
+                com.multibrowser.antidetect.automation.perception.AnchorRegistry.get()?.syncWithBackend(api)
+            } catch (e: Exception) {
+                Log.w(TAG, "Initial calibration sync notice: ${e.message}")
+            }
             startDeviceHeartbeatLoop()
             claimAndExecuteLoop()
         }
@@ -91,6 +97,17 @@ class AutomationWorkerService : Service() {
         isPaused = false
         workerJob?.cancel()
         heartbeatJob?.cancel()
+
+        runningExecutions.values.forEach { it.cancel() }
+        runningExecutions.clear()
+        activeContexts.values.forEach { ctx ->
+            serviceScope.launch(Dispatchers.Main) {
+                sessionManager.cleanup(ctx)
+            }
+        }
+        activeContexts.clear()
+        activeExecutionNames.clear()
+
         releaseWakeLock()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -120,7 +137,7 @@ class AutomationWorkerService : Service() {
                 "model_code" to Build.DEVICE,
                 "android_version" to Build.VERSION.SDK_INT,
                 "app_version" to "1.0.0",
-                "geckoview_version" to "135.0",
+                "geckoview_version" to "154.0",
                 "screen_width" to metrics.widthPixels,
                 "screen_height" to metrics.heightPixels,
                 "dpr" to metrics.density.toDouble(),
@@ -137,16 +154,38 @@ class AutomationWorkerService : Service() {
     private fun startDeviceHeartbeatLoop() {
         heartbeatJob?.cancel()
         heartbeatJob = serviceScope.launch {
+            var heartbeatCount = 0
             while (isRunning) {
                 try {
-                    val status = if (activeJobId != null) "BUSY" else "ONLINE"
+                    heartbeatCount++
+                    val status = if (runningExecutions.isNotEmpty()) "BUSY" else "ONLINE"
                     val payload = mapOf(
                         "device_id" to resolveWorkerDeviceId(),
                         "battery_percent" to getBatteryLevel(),
                         "status" to status,
-                        "current_execution" to (activeJobId ?: "")
+                        "current_execution" to (runningExecutions.keys.firstOrNull() ?: ""),
+                        "active_count" to runningExecutions.size
                     )
-                    api.sendDeviceHeartbeat(payload)
+                    val hbResponse = api.sendDeviceHeartbeat(payload)
+                    val serverRes = hbResponse.get("default_video_resolution")?.asString
+                    if (!serverRes.isNullOrBlank()) {
+                        withContext(Dispatchers.Main) {
+                            MainActivity.activeInstance?.browserCoordinator?.let { coord ->
+                                if (coord.activeVideoResolution != serverRes) {
+                                    coord.broadcastVideoResolution(serverRes)
+                                }
+                            }
+                        }
+                    }
+
+                    // Periodically sync visual calibration model every 10 cycles (~5 mins)
+                    if (heartbeatCount % 10 == 0) {
+                        try {
+                            com.multibrowser.antidetect.automation.perception.AnchorRegistry.get()?.syncWithBackend(api)
+                        } catch (e: Exception) {
+                            Log.d(TAG, "Periodic calibration sync notice: ${e.message}")
+                        }
+                    }
                 } catch (e: Exception) {
                     Log.d(TAG, "Device heartbeat error: ${e.message}")
                 }
@@ -164,19 +203,29 @@ class AutomationWorkerService : Service() {
                 continue
             }
 
+            // If concurrent capacity is reached, wait before polling again
+            if (runningExecutions.size >= MAX_CONCURRENT_PROFILES) {
+                delay(5_000L)
+                continue
+            }
+
             // Battery threshold check: if battery < 15% and discharging, pause claiming work
             val batteryLevel = getBatteryLevel()
             val isCharging = isDeviceCharging()
             if (batteryLevel < 15 && !isCharging) {
                 Log.w(TAG, "Low battery ($batteryLevel%) and not charging. Throttling worker.")
                 updateNotification("Paused: Low battery ($batteryLevel%). Waiting for charge.")
-                releaseWakeLock()
+                if (runningExecutions.isEmpty()) {
+                    releaseWakeLock()
+                }
                 delay(60_000L)
                 continue
             }
 
             try {
-                updateNotification("Polling control plane for eligible jobs...")
+                if (runningExecutions.isEmpty()) {
+                    updateNotification("Polling control plane for eligible jobs...")
+                }
                 val claimResp = api.claimNext(mapOf("device_id" to deviceId))
 
                 val hasWork = claimResp.get("has_work")?.asBoolean ?: false
@@ -189,56 +238,78 @@ class AutomationWorkerService : Service() {
                         null
                     }
 
-                    if (execution != null) {
-                        activeJobId = execution.executionId
-                        activeProfileName = execution.profileName
-                        acquireWakeLock()
-                        updateNotification("Running: ${execution.profileName} [${execution.executionId.take(8)}]")
-                        Log.i(TAG, "Claimed execution ${execution.executionId} on profile ${execution.profileName}. Preparing session...")
-
-                        var workerContext: WorkerExecutionContext? = null
-                        try {
-                            workerContext = sessionManager.prepare(
-                                profileId = execution.profileId,
-                                profileName = execution.profileName,
-                                deviceId = deviceId
-                            )
-                            updateNotification("Executing DAG on ${execution.profileName}...")
-                            val result = workerContext.runner.execute(execution)
-                            Log.i(TAG, "Execution ${execution.executionId} finished. Success: ${result.success}, State: ${result.terminalState}, Steps: ${result.stepsExecuted}")
-                            updateNotification("Completed ${execution.profileName} (Status: ${result.terminalState})")
-                        } catch (e: CancellationException) {
-                            Log.i(TAG, "Execution cancelled for ${execution.executionId}")
-                            throw e
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Execution failed for ${execution.executionId}: ${e.message}", e)
-                            updateNotification("Execution failed: ${e.message?.take(30)}")
-                            try {
-                                api.transitionState(
-                                    execution.executionId,
-                                    mapOf(
-                                        "transition_id" to java.util.UUID.randomUUID().toString(),
-                                        "outcome" to "FAILURE",
-                                        "error" to (e.message ?: "Worker execution failure")
-                                    )
-                                )
-                            } catch (ignored: Exception) {}
-                        } finally {
-                            if (workerContext != null) {
-                                sessionManager.cleanup(workerContext)
-                            }
-                            activeJobId = null
-                            activeProfileName = null
-                            releaseWakeLock()
+                    if (execution != null && !runningExecutions.containsKey(execution.executionId)) {
+                        val isProfileAlreadyRunning = activeContexts.values.any { it.profile.id == execution.profileId } ||
+                            activeExecutionNames.values.any { it == execution.profileName }
+                        if (isProfileAlreadyRunning) {
+                            Log.w(TAG, "Profile '${execution.profileName}' (${execution.profileId}) already has an active task executing locally. Skipping duplicate dispatch.")
+                            delay(3_000L)
+                            continue
                         }
+
+                        val executionId = execution.executionId
+                        val execJob = serviceScope.launch {
+                            var workerContext: WorkerExecutionContext? = null
+                            try {
+                                acquireWakeLock()
+                                activeExecutionNames[executionId] = execution.profileName
+                                updateNotification("Running (${runningExecutions.size}): ${activeExecutionNames.values.joinToString(", ").take(40)}")
+                                Log.i(TAG, "Claimed execution $executionId on profile ${execution.profileName}. Preparing session...")
+
+                                workerContext = sessionManager.prepare(
+                                    profileId = execution.profileId,
+                                    profileName = execution.profileName,
+                                    deviceId = deviceId
+                                )
+                                activeContexts[executionId] = workerContext
+                                updateNotification("Executing: ${execution.profileName}...")
+
+                                val result = workerContext.runner.execute(execution)
+                                Log.i(TAG, "Execution $executionId finished. Success: ${result.success}, State: ${result.terminalState}, Steps: ${result.stepsExecuted}")
+                            } catch (e: CancellationException) {
+                                Log.i(TAG, "Execution cancelled for $executionId")
+                                throw e
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Execution failed for $executionId: ${e.message}", e)
+                                try {
+                                    api.transitionState(
+                                        executionId,
+                                        mapOf(
+                                            "transition_id" to java.util.UUID.randomUUID().toString(),
+                                            "outcome" to "FAILURE",
+                                            "error" to (e.message ?: "Worker execution failure")
+                                        )
+                                    )
+                                } catch (ignored: Exception) {}
+                            } finally {
+                                if (workerContext != null) {
+                                    sessionManager.cleanup(workerContext)
+                                }
+                                activeContexts.remove(executionId)
+                                activeExecutionNames.remove(executionId)
+                                runningExecutions.remove(executionId)
+                                if (runningExecutions.isEmpty()) {
+                                    releaseWakeLock()
+                                    updateNotification("Online - Idle. Waiting for scheduled automations.")
+                                } else {
+                                    updateNotification("Running (${runningExecutions.size}): ${activeExecutionNames.values.joinToString(", ").take(40)}")
+                                }
+                            }
+                        }
+                        runningExecutions[executionId] = execJob
+                        delay(2_000L)
                     }
                 } else {
-                    updateNotification("Online - Idle. Waiting for scheduled automations.")
+                    if (runningExecutions.isEmpty()) {
+                        updateNotification("Online - Idle. Waiting for scheduled automations.")
+                    }
                     delay(10_000L)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Error in claim loop: ${e.message}. Backing off 15s.")
-                updateNotification("Connection issue. Retrying in 15s...")
+                if (runningExecutions.isEmpty()) {
+                    updateNotification("Connection issue. Retrying in 15s...")
+                }
                 delay(15_000L)
             }
         }
@@ -353,6 +424,7 @@ class AutomationWorkerService : Service() {
 
     companion object {
         private const val TAG = "AutomationWorkerService"
+        const val MAX_CONCURRENT_PROFILES = 5
         const val CHANNEL_ID = "terso_automation_worker_channel"
         const val NOTIFICATION_ID = 2026
 

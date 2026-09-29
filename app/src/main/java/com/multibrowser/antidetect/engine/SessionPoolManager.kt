@@ -9,6 +9,12 @@ import org.mozilla.geckoview.GeckoSession
 import org.mozilla.geckoview.GeckoSessionSettings
 import org.mozilla.geckoview.GeckoView
 import org.mozilla.geckoview.WebExtension
+import com.multibrowser.antidetect.sync.CookieEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import android.util.Log
 import java.io.File
 import java.io.FileWriter
 
@@ -70,22 +76,44 @@ class SessionPoolManager(private val context: Context) {
         val jsCommand = """
             window.postMessage({ type: 'SET_MUTE_STATE', muted: $muted, fromNative: true }, '*');
             document.querySelectorAll('video, audio').forEach(function(el) {
-                el.muted = $muted;
-                el.volume = ${if (muted) "0.0" else "1.0"};
+                try {
+                    el.muted = $muted;
+                    el.volume = ${if (muted) "0.0" else "1.0"};
+                    if (!${muted} && el.paused) {
+                        el.play().catch(function(){});
+                    }
+                } catch(e) {}
             });
-            var p = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-            if (p) {
-                if ($muted) {
-                    if (typeof p.mute === 'function') p.mute();
-                    if (typeof p.setVolume === 'function') p.setVolume(0);
-                } else {
-                    if (typeof p.unMute === 'function') p.unMute();
-                    if (typeof p.setVolume === 'function') p.setVolume(100);
+            try {
+                var p = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                if (p) {
+                    if ($muted) {
+                        if (typeof p.mute === 'function') p.mute();
+                        if (typeof p.setVolume === 'function') p.setVolume(0);
+                    } else {
+                        if (typeof p.unMute === 'function') p.unMute();
+                        if (typeof p.setVolume === 'function') p.setVolume(100);
+                        if (typeof p.getPlayerState === 'function' && p.getPlayerState() === 2) {
+                            p.playVideo();
+                        }
+                    }
                 }
-            }
-        """.trimIndent()
+            } catch(e) {}
+        """.trimIndent().replace("\n", " ")
 
         session.loadUri("javascript:(function(){ $jsCommand })();")
+    }
+
+    fun sendResolutionCommandToSession(profileId: String, resolution: String) {
+        val session = activeSessions[profileId] ?: return
+        val jsCommand = "window.postMessage({ type: 'SET_VIDEO_RESOLUTION', resolution: '$resolution' }, '*');"
+        session.loadUri("javascript:(function(){ $jsCommand })();")
+    }
+
+    fun broadcastResolutionCommand(resolution: String) {
+        activeSessions.keys.forEach { profileId ->
+            sendResolutionCommandToSession(profileId, resolution)
+        }
     }
 
     fun registerSession(profileId: String, session: GeckoSession) {
@@ -132,12 +160,23 @@ class SessionPoolManager(private val context: Context) {
 
         // 5. Configure Session to NOT suspend media when inactive
         val sessionSettings = GeckoSessionSettings.Builder()
+            .useTrackingProtection(true)
             .suspendMediaWhenInactive(false) // Keeps background streams alive and decoding
             .userAgentOverride(profile.userAgent)
             .viewportMode(GeckoSessionSettings.VIEWPORT_MODE_MOBILE)
             .usePrivateMode(false)
             .contextId(profile.id)
             .build()
+
+        // Pre-restore session cookies if present
+        if (profile.cookiesJson.isNotBlank() && profile.cookiesJson != "[]") {
+            try {
+                val restored = CookieEngine.importCookiesFromJson(context, profile.id, profile.cookiesJson)
+                Log.i("SessionPoolManager", "Pre-restored $restored session cookies for profile '${profile.name}'")
+            } catch (e: Exception) {
+                Log.w("SessionPoolManager", "Error restoring cookies for profile '${profile.name}': ${e.message}")
+            }
+        }
 
         val session = GeckoSession(sessionSettings)
         session.open(runtime)
@@ -160,6 +199,16 @@ class SessionPoolManager(private val context: Context) {
         if (geckoView?.session == activeSessions[profileId]) {
             geckoView?.releaseSession()
         }
+
+        // Trigger asynchronous cookie sync to save session
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
+            try {
+                CookieEngine.syncProfileCookiesById(context, profileId)
+            } catch (e: Exception) {
+                Log.w("SessionPoolManager", "Error syncing cookies on close: ${e.message}")
+            }
+        }
+
         try {
             activeSessions[profileId]?.close()
         } catch (e: Exception) {
@@ -167,11 +216,6 @@ class SessionPoolManager(private val context: Context) {
         }
         activeSessions.remove(profileId)
 
-        try {
-            runtimePool[profileId]?.shutdown()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
         runtimePool.remove(profileId)
 
         if (currentActiveProfileId == profileId) {
@@ -225,68 +269,113 @@ class SessionPoolManager(private val context: Context) {
     }
 
     private fun generateConfig(targetFile: File, forceMute: Boolean, profile: ProfileEntity) {
-        val webRtcArgs = when (profile.webRtcMode) {
-            "Disabled" -> """
-              - "--pref"
-              - "media.peerconnection.enabled=false"
-            """.trimIndent()
-            "Direct" -> """
-              - "--pref"
-              - "media.peerconnection.ice.default_address_only=false"
-            """.trimIndent()
-            else -> """
-              - "--pref"
-              - "media.peerconnection.ice.default_address_only=true"
-            """.trimIndent()
+        val hasProxy = profile.proxyType != "DIRECT" && profile.proxyHost.isNotBlank() && profile.proxyPort > 0
+        val webRtcPrefs = when (profile.webRtcMode) {
+            "Disabled" -> "media.peerconnection.enabled: false"
+            "Direct" -> if (hasProxy) {
+                """
+                media.peerconnection.ice.default_address_only: true
+                media.peerconnection.ice.no_host: true
+                media.peerconnection.ice.proxy_only: true
+                """.trimIndent()
+            } else {
+                "media.peerconnection.ice.default_address_only: false"
+            }
+            else -> if (hasProxy) {
+                """
+                media.peerconnection.ice.default_address_only: true
+                media.peerconnection.ice.no_host: true
+                media.peerconnection.ice.proxy_only: true
+                """.trimIndent()
+            } else {
+                """
+                media.peerconnection.ice.default_address_only: true
+                media.peerconnection.ice.no_host: true
+                """.trimIndent()
+            }
         }
 
-        val proxyArgs = if (profile.proxyType != "DIRECT" && profile.proxyHost.isNotBlank() && profile.proxyPort > 0) {
+        val proxyPrefs = if (hasProxy) {
             val proxyTypeInt = when (profile.proxyType.uppercase()) {
                 "HTTP" -> 1
                 "SOCKS5" -> 2
                 "SOCKS4" -> 3
                 else -> 1
             }
-            """
-              - "--pref"
-              - "network.proxy.type=1"
-              - "--pref"
-              - "network.proxy.http=${profile.proxyHost}"
-              - "--pref"
-              - "network.proxy.http_port=${profile.proxyPort}"
-              - "--pref"
-              - "network.proxy.ssl=${profile.proxyHost}"
-              - "--pref"
-              - "network.proxy.ssl_port=${profile.proxyPort}"
-              - "--pref"
-              - "network.proxy.socks=${profile.proxyHost}"
-              - "--pref"
-              - "network.proxy.socks_port=${profile.proxyPort}"
-              - "--pref"
-              - "network.proxy.socks_version=${if (proxyTypeInt == 2) 5 else 4}"
-              - "--pref"
-              - "network.proxy.socks_remote_dns=true"
-            """.trimIndent()
+            if (proxyTypeInt == 2 || proxyTypeInt == 3) {
+                """
+                network.proxy.type: 1
+                network.proxy.socks: "${profile.proxyHost}"
+                network.proxy.socks_port: ${profile.proxyPort}
+                network.proxy.socks_version: ${if (proxyTypeInt == 2) 5 else 4}
+                network.proxy.socks_remote_dns: true
+                """.trimIndent()
+            } else {
+                """
+                network.proxy.type: 1
+                network.proxy.http: "${profile.proxyHost}"
+                network.proxy.http_port: ${profile.proxyPort}
+                network.proxy.ssl: "${profile.proxyHost}"
+                network.proxy.ssl_port: ${profile.proxyPort}
+                """.trimIndent()
+            }
         } else ""
 
-        val yaml = """
-            env:
-              MOZ_REMOTE_SETTINGS_DEV: "1"
-            args:
-              - "--pref"
-              - "privacy.resistFingerprinting=true"
-              - "--pref"
-              - "privacy.resistFingerprinting.autoDeclineNoUserInputCanvasPrompts=true"
-              - "--pref"
-              - "media.suspend-bkgnd-video.enabled=false"
-              - "--pref"
-              - "media.pause-bkgnd-video.enabled=false"
-              - "--pref"
-              - "media.autoplay.default=0"
-              $webRtcArgs
-              $proxyArgs
-        """.trimIndent()
+        val yamlBuilder = StringBuilder()
+        yamlBuilder.appendLine("env:")
+        yamlBuilder.appendLine("  MOZ_REMOTE_SETTINGS_DEV: \"1\"")
+        val cores = if (profile.cpuCores > 0) profile.cpuCores else 8
+        yamlBuilder.appendLine("prefs:")
+        yamlBuilder.appendLine("  network.dns.disableIPv6: true")
+        yamlBuilder.appendLine("  privacy.resistFingerprinting: false")
+        yamlBuilder.appendLine("  dom.maxHardwareConcurrency: $cores")
+        yamlBuilder.appendLine("  privacy.reduceTimerPrecision: true")
+        yamlBuilder.appendLine("  media.suspend-bkgnd-video.enabled: false")
+        yamlBuilder.appendLine("  media.pause-bkgnd-video.enabled: false")
+        yamlBuilder.appendLine("  media.autoplay.default: 0")
+        yamlBuilder.appendLine("  dom.suspend_inactive.enabled: false")
+        yamlBuilder.appendLine("  dom.timeout.background_delay_ms: 100")
 
-        FileWriter(targetFile, false).use { it.write(yaml) }
+        // --- WEBRENDER & GPU HARDWARE ACCELERATION ---
+        yamlBuilder.appendLine("  gfx.webrender.all: true")
+        yamlBuilder.appendLine("  gfx.webrender.compositor: true")
+        yamlBuilder.appendLine("  layers.acceleration.force-enabled: true")
+        yamlBuilder.appendLine("  media.hardware-video-decoding.enabled: true")
+        yamlBuilder.appendLine("  media.mediasource.webm.enabled: true")
+        yamlBuilder.appendLine("  media.ffmpeg.vaapi.enabled: true")
+        yamlBuilder.appendLine("  gl.use-android-surface: true")
+
+        // --- HIGH-PERFORMANCE DISK & MEMORY CACHE (BFCACHE) ---
+        yamlBuilder.appendLine("  browser.cache.disk.enable: true")
+        yamlBuilder.appendLine("  browser.cache.disk.capacity: 256000")
+        yamlBuilder.appendLine("  browser.cache.disk.smart_size.enabled: false")
+        yamlBuilder.appendLine("  browser.cache.memory.enable: true")
+        yamlBuilder.appendLine("  browser.cache.memory.capacity: 65536")
+        yamlBuilder.appendLine("  browser.sessionhistory.max_entries: 50")
+        yamlBuilder.appendLine("  browser.sessionhistory.max_total_viewers: 5")
+        yamlBuilder.appendLine("  image.mem.surfacecache.max_size_kb: 102400")
+
+        // --- ASYNC PAN/ZOOM (APZ) KINETIC TOUCH SCROLLING ---
+        yamlBuilder.appendLine("  apz.overscroll.enabled: true")
+        yamlBuilder.appendLine("  apz.fling_friction: 0.002")
+        yamlBuilder.appendLine("  apz.touch_start_tolerance: 0.05")
+        yamlBuilder.appendLine("  apz.allow_zooming: true")
+        yamlBuilder.appendLine("  general.smoothScroll: true")
+
+        // --- NETWORK PIPELINING & TLS OPTIMIZATION ---
+        yamlBuilder.appendLine("  network.http.max-connections: 128")
+        yamlBuilder.appendLine("  network.http.max-connections-per-server: 16")
+        yamlBuilder.appendLine("  network.ssl_tokens_cache_capacity: 2048")
+
+        webRtcPrefs.lines().filter { it.isNotBlank() }.forEach { line ->
+            yamlBuilder.appendLine("  ${line.trim()}")
+        }
+        if (proxyPrefs.isNotBlank()) {
+            proxyPrefs.lines().filter { it.isNotBlank() }.forEach { line ->
+                yamlBuilder.appendLine("  ${line.trim()}")
+            }
+        }
+
+        FileWriter(targetFile, false).use { it.write(yamlBuilder.toString()) }
     }
 }

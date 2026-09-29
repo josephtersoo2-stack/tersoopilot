@@ -192,23 +192,50 @@ object SyncManager {
         autoSaveDebounceJob = scope.launch {
             delay(1500) // 1.5s debounce
 
-            // 1. Secure cookie storage: encrypt before writing to local DB
-            val encryptedCookies = try {
-                CookieEngine.encryptCookiePayload(cookiesJson)
-            } catch (e: Exception) {
-                Log.w(TAG, "Falling back to unencrypted cookies due to encryption issue", e)
-                cookiesJson
+            // 1. Decrypt or extract clean plaintext cookies
+            val rawPlaintext = CookieEngine.decryptCookiePayload(cookiesJson)
+            val effectiveRawCookies = if (rawPlaintext.isNotBlank() && rawPlaintext != "[]") {
+                rawPlaintext
+            } else {
+                val exported = CookieEngine.exportCookiesToJson(context, profileId)
+                if (exported.isNotBlank() && exported != "[]") exported else ""
             }
 
-            // 2. Save session locally in SQLite
+            val parsedCount = try {
+                if (effectiveRawCookies.isNotBlank()) org.json.JSONArray(effectiveRawCookies).length() else 0
+            } catch (_: Exception) { 0 }
+
             val db = AppDatabase.getDatabase(context)
+            val existing = db.dao.getProfileById(profileId)
+
+            val finalPlaintextCookies = if (parsedCount > 0) {
+                effectiveRawCookies
+            } else if (existing != null && existing.cookieCount > 0 && existing.cookiesJson.isNotBlank() && existing.cookiesJson != "[]") {
+                CookieEngine.decryptCookiePayload(existing.cookiesJson)
+            } else {
+                "[]"
+            }
+
+            val finalCount = if (parsedCount > 0) {
+                parsedCount
+            } else {
+                existing?.cookieCount ?: 0
+            }
+
+            // 2. Encrypt for local Room DB storage using hardware-backed TokenVault AES-GCM
+            val encryptedForLocalDb = if (finalPlaintextCookies.isNotBlank() && finalPlaintextCookies != "[]") {
+                CookieEngine.encryptCookiePayload(finalPlaintextCookies)
+            } else {
+                "[]"
+            }
+
             try {
                 db.dao.updateSessionData(
                     id = profileId,
-                    cookiesJson = encryptedCookies,
+                    cookiesJson = encryptedForLocalDb,
                     historyJson = historyJson,
                     tabsJson = tabsJson,
-                    cookieCount = cookieCount
+                    cookieCount = finalCount
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to save session locally", e)
@@ -220,16 +247,26 @@ object SyncManager {
                     val req = AutoSaveSessionRequest(
                         deviceSyncId = profileId,
                         name = name,
-                        cookiesData = encryptedCookies,
+                        cookiesData = finalPlaintextCookies,
                         historyData = historyJson,
                         tabsData = tabsJson,
-                        cookieCount = cookieCount,
+                        cookieCount = finalCount,
                         lastUsedTimestamp = System.currentTimeMillis()
                     )
                     RetrofitInstance.api.autoSaveSession(req)
-                    Log.d(TAG, "Auto-saved session to cloud for profile '$name'")
+                    Log.d(TAG, "Auto-saved session to cloud for profile '$name' with $finalCount cookies")
                 } catch (e: Exception) {
                     Log.w(TAG, "Cloud auto-save skipped or offline: ${e.message}")
+                }
+
+                // Also trigger secondary push to /api/profiles/<id>/cookies/import/ for instant fleet sync
+                if (finalCount > 0) {
+                    try {
+                        val targetBackendId = existing?.cloudSyncId?.ifBlank { null } ?: profileId
+                        CookieSyncDispatcher.syncCookiesToBackend(targetBackendId, finalPlaintextCookies)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Secondary cookie sync dispatcher skipped: ${e.message}")
+                    }
                 }
             }
         }

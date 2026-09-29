@@ -9,7 +9,7 @@ def home_status_view(request):
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>OctoMobile Backend Server</title>
+        <title>TersooPilot Backend Server</title>
         <style>
             * { box-sizing: border-box; margin: 0; padding: 0; }
             body {
@@ -96,7 +96,7 @@ def home_status_view(request):
         <div class="card">
             <div class="header">
                 <span class="pulse"></span>
-                <h1>OctoMobile Django Backend is RUNNING</h1>
+                <h1>TersooPilot Django Backend is RUNNING</h1>
             </div>
             <div class="badge">Status: Online &amp; Healthy on port 8000</div>
             <p>The Django backend REST API and admin services are actively listening and accepting connections from Android clients and web administrative consoles.</p>
@@ -118,11 +118,14 @@ def home_status_view(request):
     """
     return HttpResponse(html)
 
+from django.shortcuts import redirect
+
 urlpatterns = [
-    path("", home_status_view, name="home_status"),
+    path("", lambda request: redirect("admin:index"), name="home"),
     path("admin/", admin.site.urls),
     path("api/executions/", include("executions.urls")),
     path("api/automation/", include("automation.urls")),
     path("api/ai/", include("ai_assistant.urls")),
+    path("api/system/updates/", include("system_updater.urls")),
     path("api/", include("devices.urls")),
 ]

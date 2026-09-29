@@ -7,12 +7,14 @@ import androidx.lifecycle.viewModelScope
 import com.multibrowser.antidetect.data.db.AppDatabase
 import com.multibrowser.antidetect.data.model.ProfileEntity
 import com.multibrowser.antidetect.network.RetrofitInstance
+import com.multibrowser.antidetect.sync.CookieEngine
 import com.multibrowser.antidetect.sync.SyncManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -44,6 +46,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         fetchGlobalSettings()
+        syncAllProfileCookies()
+    }
+
+    fun syncAllProfileCookies() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val list = db.dao.getAllProfiles().first()
+                list.forEach { p ->
+                    CookieEngine.syncProfileCookies(getApplication<Application>(), p)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Startup cookie sync non-fatal error: ${e.message}")
+            }
+        }
     }
 
     fun fetchGlobalSettings() {

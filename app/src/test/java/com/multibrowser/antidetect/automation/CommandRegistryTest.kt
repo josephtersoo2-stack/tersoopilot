@@ -94,12 +94,47 @@ class CommandRegistryTest {
             "YT_LIKE_VIDEO", "YT_SUBSCRIBE_CHANNEL",
             "YT_DISMISS_PRE_ROLL_AD", "DISMISS_POPUP",
             "TYPE_TEXT", "BÉZIER_SWIPE", "YT_SHORTS_SWIPE",
-            "WAIT_PLAYBACK", "TIER2_FALLBACK", "TERMINATE", "COMPLETE"
+            "WAIT_PLAYBACK", "TIER2_FALLBACK", "TERMINATE", "COMPLETE",
+            "CLICK_ELEMENT", "CLICK_LINK", "TYPE_AND_ENTER", "CLICK_AD_IFRAME", "AI_TYPE", "GO_TO_URL"
         )
 
         for (cmd in expected) {
             assertTrue("Command $cmd must be present in SUPPORTED_COMMANDS",
                 CommandRegistry.SUPPORTED_COMMANDS.contains(cmd))
         }
+    }
+
+    @Test
+    fun testVisualWorkflowDagValidationPasses() {
+        val visualWorkflowDag = JsonObject().apply {
+            val states = JsonObject().apply {
+                add("step_1_start", JsonObject().apply {
+                    addProperty("command", "NAVIGATE")
+                })
+                add("step_2_click_link", JsonObject().apply {
+                    addProperty("command", "CLICK_LINK")
+                })
+                add("step_3_click_element", JsonObject().apply {
+                    addProperty("command", "CLICK_ELEMENT")
+                })
+                add("step_4_type_enter", JsonObject().apply {
+                    addProperty("command", "TYPE_AND_ENTER")
+                })
+                add("step_5_ad_click", JsonObject().apply {
+                    addProperty("command", "CLICK_AD_IFRAME")
+                })
+                add("step_6_ai_type", JsonObject().apply {
+                    addProperty("command", "AI_TYPE")
+                })
+                add("exit", JsonObject().apply {
+                    addProperty("command", "TERMINATE")
+                })
+            }
+            add("states", states)
+        }
+
+        val result = CommandRegistry.validateDag(visualWorkflowDag)
+        assertTrue("Visual workflow DAG must pass validation cleanly",
+            result is CommandRegistry.ValidationResult.Valid)
     }
 }

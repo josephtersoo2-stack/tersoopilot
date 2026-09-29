@@ -61,21 +61,14 @@ class GeckoProfileManager(private val context: Context) {
         val yaml = """
             env:
               MOZ_REMOTE_SETTINGS_DEV: "1"
-            args:
-              - "--pref"
-              - "privacy.resistFingerprinting=true"
-              - "--pref"
-              - "privacy.resistFingerprinting.autoDeclineNoUserInputCanvasPrompts=true"
-              - "--pref"
-              - "privacy.reduceTimerPrecision=true"
-              - "--pref"
-              - "privacy.resistFingerprinting.reduceTimerPrecision.microseconds=20000"
-              - "--pref"
-              - "media.peerconnection.ice.default_address_only=true"
-              - "--pref"
-              - "media.peerconnection.ice.no_host=true"
-              - "--pref"
-              - "dom.security.https_only_mode=false"
+            prefs:
+              network.dns.disableIPv6: true
+              privacy.resistFingerprinting: false
+              dom.maxHardwareConcurrency: 8
+              privacy.reduceTimerPrecision: true
+              media.peerconnection.ice.default_address_only: true
+              media.peerconnection.ice.no_host: true
+              dom.security.https_only_mode: false
         """.trimIndent()
 
         FileWriter(targetFile, false).use { it.write(yaml) }

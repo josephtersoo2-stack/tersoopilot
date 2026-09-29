@@ -12,8 +12,8 @@ class AgentRecoveryAction(BaseModel):
     action: Literal["TAP_COORDINATES", "BÉZIER_SWIPE", "WAIT", "NAVIGATE", "TERMINATE"] = Field(
         description="The physical recovery action GhostPilot should execute."
     )
-    target_x: Optional[int] = Field(default=None, description="Screen X coordinate to tap, if applicable.")
-    target_y: Optional[int] = Field(default=None, description="Screen Y coordinate to tap, if applicable.")
+    target_x: Optional[int] = Field(default=None, description="Screen X coordinate to tap (normalized 0-1000 scale where 0 is left, 1000 is right), if applicable.")
+    target_y: Optional[int] = Field(default=None, description="Screen Y coordinate to tap (normalized 0-1000 scale where 0 is top, 1000 is bottom), if applicable.")
     swipe_direction: Optional[Literal["UP", "DOWN", "LEFT", "RIGHT"]] = Field(default=None)
     navigate_url: Optional[str] = Field(default=None)
     wait_seconds: Optional[int] = Field(default=None)

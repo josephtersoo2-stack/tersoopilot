@@ -13,16 +13,28 @@ class CoordinateMapper(private val geckoView: View) {
     private val random = Random()
 
     /**
-     * Translates a CSS-based DOM bounding box into absolute Android View coordinates.
-     * Takes into account Device Pixel Ratio (DPR) and GeckoView's physical screen location.
+     * Translates a CSS-based DOM bounding box into GeckoView local View coordinates.
+     * Scale CSS pixels by DPR directly matching GeckoView's internal touch coordinate space.
      */
     fun mapDomToScreen(rect: DomRect, dpr: Float): RectF {
+        val left = rect.left * dpr
+        val top = rect.top * dpr
+        val right = (rect.left + rect.width) * dpr
+        val bottom = (rect.top + rect.height) * dpr
+
+        return RectF(left, top, right, bottom)
+    }
+
+    /**
+     * Translates a CSS-based DOM bounding box into absolute device screen coordinates
+     * by factoring in GeckoView's physical screen location (useful for OS-level input).
+     */
+    fun mapDomToDeviceScreen(rect: DomRect, dpr: Float): RectF {
         val location = IntArray(2)
         geckoView.getLocationOnScreen(location)
         val surfaceOffsetX = location[0].toFloat()
         val surfaceOffsetY = location[1].toFloat()
 
-        // Scale CSS pixels by DPR and offset by GeckoView screen placement
         val left = (rect.left * dpr) + surfaceOffsetX
         val top = (rect.top * dpr) + surfaceOffsetY
         val right = ((rect.left + rect.width) * dpr) + surfaceOffsetX

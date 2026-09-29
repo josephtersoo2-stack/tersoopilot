@@ -2,6 +2,7 @@ package com.multibrowser.antidetect.automation
 
 import android.os.SystemClock
 import android.util.Log
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -162,8 +163,9 @@ class NativeGestureInjector(private val targetView: View) {
      */
     suspend fun injectText(text: String, wpm: Int = 65, typoProb: Double = 0.03) = withContext(Dispatchers.Main) {
         val baseDelayMs = (60000 / (wpm * 5)).coerceIn(50, 250)
+        val cleanText = text.filter { !it.isSurrogate() }
 
-        for (char in text) {
+        for (char in cleanText) {
             // Natural keystroke cadence variation
             val jitter = (random.nextGaussian() * (baseDelayMs * 0.35)).toLong()
             val charDelay = (baseDelayMs + jitter).coerceIn(40, 450)
@@ -182,15 +184,29 @@ class NativeGestureInjector(private val targetView: View) {
         }
     }
 
+    private val keyCharacterMap: KeyCharacterMap by lazy {
+        KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
+    }
+
     private fun dispatchCharKey(char: Char) {
-        val eventTime = SystemClock.uptimeMillis()
-        val keyEvent = KeyEvent(
-            eventTime,
-            char.toString(),
-            0,
-            0
-        )
-        targetView.dispatchKeyEvent(keyEvent)
+        val events = keyCharacterMap.getEvents(charArrayOf(char))
+        if (events != null && events.isNotEmpty()) {
+            for (event in events) {
+                targetView.dispatchKeyEvent(event)
+            }
+        } else {
+            when (char) {
+                '\n' -> dispatchKeyEvent(KeyEvent.KEYCODE_ENTER)
+                '\b' -> dispatchKeyEvent(KeyEvent.KEYCODE_DEL)
+                ' ' -> dispatchKeyEvent(KeyEvent.KEYCODE_SPACE)
+                '\t' -> dispatchKeyEvent(KeyEvent.KEYCODE_TAB)
+                else -> {
+                    val downTime = SystemClock.uptimeMillis()
+                    val keyEvent = KeyEvent(downTime, char.toString(), 0, 0)
+                    targetView.dispatchKeyEvent(keyEvent)
+                }
+            }
+        }
     }
 
     private fun dispatchKeyEvent(keyCode: Int) {

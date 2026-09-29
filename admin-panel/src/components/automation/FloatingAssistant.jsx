@@ -340,8 +340,8 @@ export default function FloatingAssistant({
         <div
           className={`fixed z-50 transition-all duration-200 flex flex-col bg-[#0D111A]/95 backdrop-blur-xl border border-[#1E2638] rounded-2xl shadow-2xl overflow-hidden ${
             isExpanded
-              ? 'w-[720px] h-[750px] max-w-[95vw] max-h-[92vh] right-6 bottom-6'
-              : 'w-[450px] h-[620px] max-w-[95vw] max-h-[85vh] right-6 bottom-20'
+              ? 'w-full sm:w-[720px] h-[90vh] sm:h-[750px] max-w-[calc(100vw-1.5rem)] sm:max-w-[95vw] max-h-[92vh] inset-x-3 sm:inset-x-auto sm:right-6 bottom-3 sm:bottom-6'
+              : 'w-full sm:w-[450px] h-[80vh] sm:h-[620px] max-w-[calc(100vw-1.5rem)] sm:max-w-[95vw] max-h-[85vh] inset-x-3 sm:inset-x-auto sm:right-6 bottom-3 sm:bottom-20'
           }`}
           style={{
             boxShadow: '0 25px 60px -15px rgba(0, 0, 0, 0.8), 0 0 40px -10px rgba(59, 130, 246, 0.25)',

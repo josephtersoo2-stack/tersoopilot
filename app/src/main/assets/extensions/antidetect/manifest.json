@@ -3,6 +3,18 @@
   "name": "TersoPilotPerceptionEngine",
   "version": "2.0",
   "description": "Perception and spatial DOM telemetry for closed-loop automation.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "antidetect-bridge@multibrowser.com",
+      "strict_min_version": "100.0"
+    }
+  },
+  "applications": {
+    "gecko": {
+      "id": "antidetect-bridge@multibrowser.com",
+      "strict_min_version": "100.0"
+    }
+  },
   "permissions": [
     "<all_urls>",
     "nativeMessaging",

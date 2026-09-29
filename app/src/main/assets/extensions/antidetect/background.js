@@ -66,11 +66,44 @@ port.onMessage.addListener(async (message) => {
     }
   } else if (message.action === "GET_COOKIES") {
     try {
-      const cookies = await browser.cookies.getAll({});
+      let allCookies = [];
+      const seen = new Set();
+
+      // 1. Enumerate all active cookie stores (contextual identities / containers)
+      try {
+        const stores = await browser.cookies.getAllCookieStores();
+        if (stores && stores.length > 0) {
+          for (const store of stores) {
+            try {
+              const storeCookies = await browser.cookies.getAll({ storeId: store.id });
+              if (storeCookies && storeCookies.length > 0) {
+                for (const c of storeCookies) {
+                  const key = `${c.domain}|${c.name}|${c.path}|${c.storeId || store.id}`;
+                  if (!seen.has(key)) {
+                    seen.add(key);
+                    allCookies.push(c);
+                  }
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      } catch (_) {}
+
+      // 2. Fallback to default store if stores iteration returned nothing
+      if (allCookies.length === 0) {
+        try {
+          const defaultCookies = await browser.cookies.getAll({});
+          if (defaultCookies && defaultCookies.length > 0) {
+            allCookies = defaultCookies;
+          }
+        } catch (_) {}
+      }
+
       await postSecureMessage({
         action: "COOKIES_DUMP",
         requestId: message.requestId,
-        cookies: cookies || []
+        cookies: allCookies || []
       });
     } catch (e) {
       await postSecureMessage({
@@ -83,30 +116,55 @@ port.onMessage.addListener(async (message) => {
   } else if (message.action === "SET_COOKIES") {
     try {
       const cookies = message.cookies || [];
+      let stores = [];
+      try {
+        stores = await browser.cookies.getAllCookieStores();
+      } catch (_) {}
+
       for (const c of cookies) {
         try {
-          if (!c.domain || !c.name) continue;
-          const cleanDomain = c.domain.startsWith(".") ? c.domain.substring(1) : c.domain;
-          const protocol = c.secure ? "https://" : "http://";
+          const rawDomain = c.domain || c.host || "";
+          const name = c.name || "";
+          if (!rawDomain || !name) continue;
+
+          const cleanDomain = rawDomain.startsWith(".") ? rawDomain.substring(1) : rawDomain;
+          const isSec = !!(c.secure || c.isSecure);
+          const protocol = isSec ? "https://" : "http://";
           const path = c.path || "/";
           const cookieUrl = `${protocol}${cleanDomain}${path}`;
-          
+
           const details = {
             url: cookieUrl,
-            name: c.name,
+            name: name,
             value: c.value || "",
-            domain: c.domain,
+            domain: rawDomain,
             path: path,
-            secure: !!c.secure,
-            httpOnly: !!c.httpOnly
+            secure: isSec,
+            httpOnly: !!(c.httpOnly || c.isHttpOnly)
           };
+
           if (c.expirationDate) {
             details.expirationDate = c.expirationDate;
+          } else if (c.expiry) {
+            details.expirationDate = c.expiry;
           }
-          if (c.sameSite) {
+          if (c.sameSite !== undefined) {
             details.sameSite = c.sameSite;
           }
+
+          // Apply to default cookie store
           await browser.cookies.set(details);
+
+          // Also set into any active container stores
+          if (stores && stores.length > 0) {
+            for (const st of stores) {
+              if (st.id && st.id !== "firefox-default") {
+                try {
+                  await browser.cookies.set({ ...details, storeId: st.id });
+                } catch (_) {}
+              }
+            }
+          }
         } catch (err) {
           // ignore individual cookie set failure
         }

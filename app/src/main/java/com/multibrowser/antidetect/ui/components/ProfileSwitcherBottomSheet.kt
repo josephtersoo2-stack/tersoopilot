@@ -23,7 +23,7 @@ import com.multibrowser.antidetect.data.model.ProfileEntity
 import com.multibrowser.antidetect.ui.theme.*
 
 data class ActiveProfileState(
-    val profile: ProfileEntity,
+    var profile: ProfileEntity,
     var tabs: List<BrowserTab>,
     var activeTabId: String,
     var liveIp: String = "Direct IP",

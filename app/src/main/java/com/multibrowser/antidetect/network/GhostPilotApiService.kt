@@ -47,4 +47,20 @@ interface GhostPilotApiService {
     suspend fun sendDeviceHeartbeat(
         @Body payload: Map<String, @JvmSuppressWildcards Any>
     ): JsonObject
+
+    @GET("api/automation/calibration/")
+    suspend fun getCalibration(
+        @Query("platform") platform: String = "YOUTUBE"
+    ): JsonObject
+
+    @POST("api/automation/calibration/")
+    suspend fun postCalibration(
+        @Body payload: Map<String, @JvmSuppressWildcards Any>
+    ): JsonObject
+
+    @POST("api/automation/calibration/anchor/")
+    suspend fun postSingleAnchor(
+        @Body payload: Map<String, @JvmSuppressWildcards Any>
+    ): JsonObject
 }
+

@@ -17,7 +17,7 @@ object ProfilePresets {
     val SAMSUNG_A54 = BrowserProfile(
         id = "profile_samsung_a54",
         name = "Samsung Galaxy A54 (Android 14)",
-        userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+        userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0",
         hardwareConcurrency = 8,
         deviceMemory = 8,
         screenWidth = 412,
@@ -30,7 +30,7 @@ object ProfilePresets {
     val PIXEL_8A = BrowserProfile(
         id = "profile_pixel_8a",
         name = "Google Pixel 8a (Android 14)",
-        userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+        userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0",
         hardwareConcurrency = 9,
         deviceMemory = 8,
         screenWidth = 412,
@@ -43,7 +43,7 @@ object ProfilePresets {
     val TECNO_CAMON_30 = BrowserProfile(
         id = "profile_tecno_camon30",
         name = "Tecno Camon 30 Pro (Android 14)",
-        userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:135.0) Gecko/135.0 Firefox/135.0",
+        userAgent = "Mozilla/5.0 (Android 14; Mobile; rv:154.0) Gecko/154.0 Firefox/154.0",
         hardwareConcurrency = 8,
         deviceMemory = 12,
         screenWidth = 393,

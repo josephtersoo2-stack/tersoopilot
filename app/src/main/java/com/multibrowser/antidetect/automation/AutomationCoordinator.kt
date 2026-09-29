@@ -42,6 +42,8 @@ class AutomationCoordinator(
             existing.onStateChanged = onStateChanged
             existing
         } else {
+            val prefs = context.getSharedPreferences("terso_device_prefs", Context.MODE_PRIVATE)
+            val devId = prefs.getString("device_id", null) ?: ""
             val created = GhostPilotRunner(
                 context = context,
                 profileId = profileId,
@@ -50,6 +52,7 @@ class AutomationCoordinator(
                 inputController = inputController,
                 profileName = profileName,
                 cloudSyncId = cloudSyncId,
+                deviceId = devId,
                 runnerScope = lifecycleScope
             ).apply {
                 this.getCurrentUrl = getCurrentUrl

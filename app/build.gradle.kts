@@ -17,7 +17,8 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
-            abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a", "x86_64"))
+            abiFilters.clear()
+            abiFilters.add("arm64-v8a")
         }
     }
 
@@ -27,10 +28,10 @@ android {
             manifestPlaceholders["usesCleartextTraffic"] = "true"
         }
         release {
-            val apiUrl = providers.gradleProperty("apiBaseUrl").orElse("https://localhost/").get()
-            require(apiUrl.startsWith("https://") && !apiUrl.contains('"') && !apiUrl.contains('\\')) { "apiBaseUrl must be an HTTPS URL" }
+            signingConfig = signingConfigs.getByName("debug")
+            val apiUrl = providers.gradleProperty("apiBaseUrl").orElse("https://tersoopilotbd.tersoo.name.ng/").get()
             buildConfigField("String", "API_BASE_URL", "\"${apiUrl.trimEnd('/')}/\"")
-            manifestPlaceholders["usesCleartextTraffic"] = "false"
+            manifestPlaceholders["usesCleartextTraffic"] = if (apiUrl.startsWith("https://")) "false" else "true"
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -74,7 +75,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
-    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
+    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // Jetpack Compose

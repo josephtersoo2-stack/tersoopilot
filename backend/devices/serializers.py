@@ -34,7 +34,7 @@ class DeviceFingerprintResponseSerializer(serializers.Serializer):
     soc = serializers.CharField()
     webgl_vendor = serializers.CharField()
     webgl_renderer = serializers.CharField()
-    ram_gb = serializers.IntegerField()
+    ram_gb = serializers.IntegerField(required=False, default=8)
     cpu_cores = serializers.IntegerField()
     screen_width = serializers.IntegerField()
     screen_height = serializers.IntegerField()

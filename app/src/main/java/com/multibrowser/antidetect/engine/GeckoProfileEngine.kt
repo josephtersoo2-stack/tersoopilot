@@ -38,6 +38,21 @@ class GeckoProfileEngine(private val context: Context) {
     private var activeSession: GeckoSession? = null
     private var currentProfile: ProfileEntity? = null
 
+    companion object {
+        const val GECKOVIEW_VERSION = "154.0"
+
+        fun normalizeUserAgent(raw: String, androidVersion: Int = 14): String {
+            if (raw.isBlank()) {
+                return "Mozilla/5.0 (Android $androidVersion; Mobile; rv:$GECKOVIEW_VERSION) Gecko/$GECKOVIEW_VERSION Firefox/$GECKOVIEW_VERSION"
+            }
+            var ua = raw
+            ua = ua.replace(Regex("rv:\\d+(\\.\\d+)?"), "rv:$GECKOVIEW_VERSION")
+            ua = ua.replace(Regex("Gecko/\\d+(\\.\\d+)?"), "Gecko/$GECKOVIEW_VERSION")
+            ua = ua.replace(Regex("Firefox/\\d+(\\.\\d+)?"), "Firefox/$GECKOVIEW_VERSION")
+            return ua
+        }
+    }
+
     private val pendingCookieCallbacks = ConcurrentHashMap<String, (String, Int) -> Unit>()
 
     fun getProfileDirectory(profileId: String): File {
@@ -80,11 +95,13 @@ class GeckoProfileEngine(private val context: Context) {
         val runtime = getOrCreateRuntime(profile)
         sendConfigPayload(profile)
 
+        val normalizedUa = normalizeUserAgent(profile.userAgent, profile.androidVersion)
         val sessionSettings = GeckoSessionSettings.Builder()
+            .useTrackingProtection(true)
             .suspendMediaWhenInactive(false) // Keeps background streams alive and decoding
             .usePrivateMode(false)
             .contextId(profile.id)
-            .userAgentOverride(profile.userAgent)
+            .userAgentOverride(normalizedUa)
             .viewportMode(GeckoSessionSettings.VIEWPORT_MODE_MOBILE)
             .build()
 
@@ -100,12 +117,17 @@ class GeckoProfileEngine(private val context: Context) {
         currentProfile = profile
         val runtime = getOrCreateRuntime(profile)
         sendConfigPayload(profile)
+        if (profile.cookiesJson.isNotBlank() && profile.cookiesJson != "[]") {
+            restoreCookies(profile.cookiesJson, profile.id)
+        }
 
+        val normalizedUa = normalizeUserAgent(profile.userAgent, profile.androidVersion)
         val sessionSettings = GeckoSessionSettings.Builder()
+            .useTrackingProtection(true)
             .suspendMediaWhenInactive(false)
             .usePrivateMode(false)
             .contextId(profile.id)
-            .userAgentOverride(profile.userAgent)
+            .userAgentOverride(normalizedUa)
             .viewportMode(GeckoSessionSettings.VIEWPORT_MODE_MOBILE)
             .build()
 
@@ -181,64 +203,120 @@ class GeckoProfileEngine(private val context: Context) {
      * and hardware-backed credential decryption for proxy authentication.
      */
     fun generateYamlConfiguration(targetFile: File, profile: ProfileEntity) {
-        val webRtcArgs = when (profile.webRtcMode) {
+        val hasProxy = profile.proxyType != "DIRECT" && profile.proxyHost.isNotBlank() && profile.proxyPort > 0
+
+        val webRtcPrefs = when (profile.webRtcMode) {
             "Disabled" -> """
-              - "--pref"
-              - "media.peerconnection.enabled=false"
+                media.peerconnection.enabled: false
             """.trimIndent()
-            "Direct" -> """
-              - "--pref"
-              - "media.peerconnection.ice.default_address_only=false"
-            """.trimIndent()
-            else -> """
-              - "--pref"
-              - "media.peerconnection.ice.default_address_only=true"
-              - "--pref"
-              - "media.peerconnection.ice.no_host=true"
-            """.trimIndent()
+            "Direct" -> if (hasProxy) {
+                """
+                media.peerconnection.ice.default_address_only: true
+                media.peerconnection.ice.no_host: true
+                media.peerconnection.ice.proxy_only: true
+                """.trimIndent()
+            } else {
+                """
+                media.peerconnection.ice.default_address_only: false
+                """.trimIndent()
+            }
+            else -> if (hasProxy) {
+                """
+                media.peerconnection.ice.default_address_only: true
+                media.peerconnection.ice.no_host: true
+                media.peerconnection.ice.proxy_only: true
+                """.trimIndent()
+            } else {
+                """
+                media.peerconnection.ice.default_address_only: true
+                media.peerconnection.ice.no_host: true
+                """.trimIndent()
+            }
         }
 
         // Decrypt proxy credentials on-the-fly from CredentialVault without leaking to database
         val proxyUserDecrypted = CredentialVault.decrypt(profile.proxyUser)
         val proxyPassDecrypted = CredentialVault.decrypt(profile.proxyPass)
 
-        val proxyArgs = if (profile.proxyType != "DIRECT" && profile.proxyHost.isNotBlank()) {
+        val proxyPrefs = if (hasProxy) {
             val pType = if (profile.proxyType == "SOCKS5") 2 else 1
-            """
-              - "--pref"
-              - "network.proxy.type=$pType"
-              - "--pref"
-              - "network.proxy.http=${profile.proxyHost}"
-              - "--pref"
-              - "network.proxy.http_port=${profile.proxyPort}"
-              - "--pref"
-              - "network.proxy.ssl=${profile.proxyHost}"
-              - "--pref"
-              - "network.proxy.ssl_port=${profile.proxyPort}"
-            """.trimIndent()
+            if (pType == 2) {
+                """
+                network.proxy.type: 1
+                network.proxy.socks: "${profile.proxyHost}"
+                network.proxy.socks_port: ${profile.proxyPort}
+                network.proxy.socks_version: 5
+                network.proxy.socks_remote_dns: true
+                """.trimIndent()
+            } else {
+                """
+                network.proxy.type: 1
+                network.proxy.http: "${profile.proxyHost}"
+                network.proxy.http_port: ${profile.proxyPort}
+                network.proxy.ssl: "${profile.proxyHost}"
+                network.proxy.ssl_port: ${profile.proxyPort}
+                """.trimIndent()
+            }
         } else ""
 
-        val yaml = """
-            env:
-              MOZ_REMOTE_SETTINGS_DEV: "1"
-            args:
-              - "--pref"
-              - "privacy.resistFingerprinting=true"
-              - "--pref"
-              - "privacy.resistFingerprinting.autoDeclineNoUserInputCanvasPrompts=true"
-              - "--pref"
-              - "privacy.reduceTimerPrecision=true"
-              - "--pref"
-              - "privacy.resistFingerprinting.reduceTimerPrecision.microseconds=20000"
-              - "--pref"
-              - "media.suspend-bkgnd-video.enabled=false"
-              - "--pref"
-              - "media.pause-bkgnd-video.enabled=false"
-              - "--pref"
-              - "media.autoplay.default=0"
-              $webRtcArgs
-              $proxyArgs
-        """.trimIndent()
+        val yamlBuilder = StringBuilder()
+        yamlBuilder.appendLine("env:")
+        yamlBuilder.appendLine("  MOZ_REMOTE_SETTINGS_DEV: \"1\"")
+        val cores = if (profile.cpuCores > 0) profile.cpuCores else 8
+        yamlBuilder.appendLine("prefs:")
+        yamlBuilder.appendLine("  network.dns.disableIPv6: true")
+        yamlBuilder.appendLine("  privacy.resistFingerprinting: false")
+        yamlBuilder.appendLine("  dom.maxHardwareConcurrency: $cores")
+        yamlBuilder.appendLine("  privacy.reduceTimerPrecision: true")
+        yamlBuilder.appendLine("  media.suspend-bkgnd-video.enabled: false")
+        yamlBuilder.appendLine("  media.pause-bkgnd-video.enabled: false")
+        yamlBuilder.appendLine("  media.autoplay.default: 0")
+        yamlBuilder.appendLine("  dom.suspend_inactive.enabled: false")
+        yamlBuilder.appendLine("  dom.timeout.background_delay_ms: 100")
+        yamlBuilder.appendLine("  browser.sessionhistory.max_total_viewers: 10")
+        yamlBuilder.appendLine("  browser.tabs.unloadOnLowMemory: false")
+        yamlBuilder.appendLine("  dom.ipc.processPriorityManager.enabled: false")
+
+        // --- WEBRENDER & GPU HARDWARE ACCELERATION ---
+        yamlBuilder.appendLine("  gfx.webrender.all: true")
+        yamlBuilder.appendLine("  gfx.webrender.compositor: true")
+        yamlBuilder.appendLine("  layers.acceleration.force-enabled: true")
+        yamlBuilder.appendLine("  media.hardware-video-decoding.enabled: true")
+        yamlBuilder.appendLine("  media.mediasource.webm.enabled: true")
+        yamlBuilder.appendLine("  media.ffmpeg.vaapi.enabled: true")
+        yamlBuilder.appendLine("  gl.use-android-surface: true")
+
+        // --- HIGH-PERFORMANCE DISK & MEMORY CACHE (BFCACHE) ---
+        yamlBuilder.appendLine("  browser.cache.disk.enable: true")
+        yamlBuilder.appendLine("  browser.cache.disk.capacity: 256000")
+        yamlBuilder.appendLine("  browser.cache.disk.smart_size.enabled: false")
+        yamlBuilder.appendLine("  browser.cache.memory.enable: true")
+        yamlBuilder.appendLine("  browser.cache.memory.capacity: 65536")
+        yamlBuilder.appendLine("  browser.sessionhistory.max_entries: 50")
+        yamlBuilder.appendLine("  browser.sessionhistory.max_total_viewers: 5")
+        yamlBuilder.appendLine("  image.mem.surfacecache.max_size_kb: 102400")
+
+        // --- ASYNC PAN/ZOOM (APZ) KINETIC TOUCH SCROLLING ---
+        yamlBuilder.appendLine("  apz.overscroll.enabled: true")
+        yamlBuilder.appendLine("  apz.fling_friction: 0.002")
+        yamlBuilder.appendLine("  apz.touch_start_tolerance: 0.05")
+        yamlBuilder.appendLine("  apz.allow_zooming: true")
+        yamlBuilder.appendLine("  general.smoothScroll: true")
+
+        // --- NETWORK PIPELINING & TLS OPTIMIZATION ---
+        yamlBuilder.appendLine("  network.http.max-connections: 128")
+        yamlBuilder.appendLine("  network.http.max-connections-per-server: 16")
+        yamlBuilder.appendLine("  network.ssl_tokens_cache_capacity: 2048")
+
+        webRtcPrefs.lines().filter { it.isNotBlank() }.forEach { line ->
+            yamlBuilder.appendLine("  ${line.trim()}")
+        }
+        if (proxyPrefs.isNotBlank()) {
+            proxyPrefs.lines().filter { it.isNotBlank() }.forEach { line ->
+                yamlBuilder.appendLine("  ${line.trim()}")
+            }
+        }
+        val yaml = yamlBuilder.toString()
 
         // Atomic file write to avoid partial/corrupt configuration on abrupt exit
         val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp_${System.nanoTime()}")
@@ -320,6 +398,19 @@ class GeckoProfileEngine(private val context: Context) {
         port.postMessage(payload)
     }
 
+    suspend fun getLiveCookies(profileId: String, timeoutMs: Long = 2500): Pair<String, Int> {
+        val port = nativePorts[profileId] ?: nativePorts.values.firstOrNull() ?: return Pair("[]", 0)
+        return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+            kotlinx.coroutines.suspendCancellableCoroutine<Pair<String, Int>> { cont ->
+                requestCookies(profileId) { jsonStr, count ->
+                    if (cont.isActive) {
+                        cont.resumeWith(Result.success(Pair(jsonStr, count)))
+                    }
+                }
+            }
+        } ?: Pair("[]", 0)
+    }
+
     fun restoreCookies(cookiesJson: String, profileId: String? = null) {
         val port = (if (profileId != null) nativePorts[profileId] else null) ?: nativePorts.values.firstOrNull() ?: return
         try {
@@ -344,6 +435,7 @@ class GeckoProfileEngine(private val context: Context) {
 
     private fun sendConfigPayload(profile: ProfileEntity) {
         val port = nativePorts[profile.id] ?: return
+        val hasProxy = profile.proxyType != "DIRECT" && profile.proxyHost.isNotBlank() && profile.proxyPort > 0
         val payload = JSONObject().apply {
             put("action", "APPLY_PROFILE")
             put("cores", profile.cpuCores)
@@ -352,15 +444,20 @@ class GeckoProfileEngine(private val context: Context) {
             put("screenWidth", profile.screenWidth)
             put("screenHeight", profile.screenHeight)
             put("dpr", profile.dpr)
+            put("webRtcMode", profile.webRtcMode)
+            put("hasProxy", hasProxy)
+            put("proxyHost", profile.proxyHost)
             put("fakeVideo", profile.selectedCameraVideoPath ?: "")
             put("payload", JSONObject().apply {
                 put("hardwareConcurrency", profile.cpuCores)
-                put("deviceMemory", profile.ramGb)
                 put("screenWidth", profile.screenWidth)
                 put("screenHeight", profile.screenHeight)
                 put("devicePixelRatio", profile.dpr)
                 put("webGlVendor", profile.webGlVendor)
                 put("webGlRenderer", profile.webGlRenderer)
+                put("webRtcMode", profile.webRtcMode)
+                put("hasProxy", hasProxy)
+                put("proxyHost", profile.proxyHost)
                 put("fakeVideo", profile.selectedCameraVideoPath ?: "")
             })
         }

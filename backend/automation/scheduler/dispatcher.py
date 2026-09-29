@@ -81,6 +81,21 @@ class JobDispatcher:
 
             candidate: Optional[Execution] = None
             for candidate_exec in pending_query[:10]:
+                # 0. Enforce strict single-task per profile execution (FIFO queueing)
+                # A profile must never run 2 tasks concurrently. If there is already an active execution
+                # (RUNNING or DISPATCHED) for this profile, subsequent tasks remain PENDING until it finishes and exits.
+                if candidate_exec.profile_id:
+                    profile_has_active_job = Execution.objects.filter(
+                        profile_id=candidate_exec.profile_id,
+                        status__in=[ExecutionStatus.RUNNING, ExecutionStatus.DISPATCHED]
+                    ).exclude(pk=candidate_exec.pk).exists()
+                    if profile_has_active_job:
+                        logger.debug(
+                            f"Profile '{candidate_exec.profile.name}' (id={candidate_exec.profile_id}) "
+                            f"already has an active task running/dispatched. Keeping execution {candidate_exec.id} pending."
+                        )
+                        continue
+
                 # 1. Validate automation state
                 if candidate_exec.automation_run and candidate_exec.automation_run.automation:
                     automation = candidate_exec.automation_run.automation
@@ -133,6 +148,14 @@ class JobDispatcher:
             if candidate.recovery_status == RecoveryStatus.PENDING:
                 candidate.recovery_status = RecoveryStatus.RUNNING
             candidate.save(update_fields=["status", "recovery_status", "updated_at"])
+
+            try:
+                if hasattr(candidate, 'lease') and candidate.lease and candidate.lease.id != lease.id:
+                    old_lease = candidate.lease
+                    old_lease.execution = None
+                    old_lease.save(update_fields=["execution", "updated_at"])
+            except Exception as e:
+                logger.debug(f"Could not clear previous lease on candidate: {e}")
 
             lease.execution = candidate
             lease.save(update_fields=["execution", "updated_at"])

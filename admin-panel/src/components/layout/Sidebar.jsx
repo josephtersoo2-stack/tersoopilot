@@ -13,6 +13,12 @@ import {
   MessageCircle,
   Calendar,
   Radio,
+  Crosshair,
+  GitFork,
+  Rocket,
+  Puzzle,
+  X,
+  LogOut,
 } from 'lucide-react';
 
 export default function Sidebar({
@@ -22,16 +28,41 @@ export default function Sidebar({
   profilesCount = 0,
   runningJobsCount = 0,
   activeModelName = '',
-  isAudioMuted = true
+  isAudioMuted = true,
+  isMobileOpen = false,
+  onCloseMobile,
+  onLogout
 }) {
   const navSections = [
     {
       title: 'OPERATIONS & TELEMETRY',
       items: [
         {
+          id: 'LAUNCH',
+          label: 'Launch Campaign',
+          icon: Rocket,
+        },
+        {
+          id: 'WORKFLOW_BUILDER',
+          label: 'Visual Workflows',
+          icon: GitFork,
+        },
+        {
+          id: 'ADDONS',
+          label: 'Extensions & Addons',
+          icon: Puzzle,
+          badge: 'Modular',
+          badgeColor: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30'
+        },
+        {
           id: 'AUTOMATIONS',
           label: 'Automations Hub',
           icon: Calendar,
+        },
+        {
+          id: 'CALIBRATION',
+          label: 'Spatial Calibration',
+          icon: Crosshair,
         },
         {
           id: 'FLEET',
@@ -92,18 +123,29 @@ export default function Sidebar({
           id: 'SETTINGS',
           label: 'Runtime Constraints',
           icon: Sliders,
+        },
+        {
+          id: 'UPDATES',
+          label: 'System Updates & Patches',
+          icon: ShieldCheck,
+          badge: 'Hot-Patch',
+          badgeColor: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
         }
       ]
     }
   ];
 
   return (
-    <aside className="w-64 bg-[#0D111A] border-r border-[#1E2638] flex flex-col justify-between shrink-0 select-none min-h-screen">
+    <aside
+      className={`fixed inset-y-0 left-0 z-50 w-72 max-w-[85vw] lg:w-64 lg:static lg:z-auto bg-[#0D111A] border-r border-[#1E2638] flex flex-col justify-between shrink-0 select-none min-h-screen h-screen overflow-y-auto transform transition-transform duration-300 ease-in-out ${
+        isMobileOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
+      }`}
+    >
       <div>
         {/* Brand Header */}
-        <div className="p-5 border-b border-[#1E2638] flex items-center justify-between">
+        <div className="p-4 sm:p-5 border-b border-[#1E2638] flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-blue-500/20 shrink-0">
               <Zap className="w-5 h-5 text-white fill-white" />
             </div>
             <div>
@@ -116,12 +158,24 @@ export default function Sidebar({
               <p className="text-[10px] text-neutral-400">Fleet Control Center</p>
             </div>
           </div>
+
+          {/* Mobile Drawer Close Button */}
+          <button
+            onClick={onCloseMobile}
+            className="lg:hidden p-1.5 rounded-xl text-neutral-400 hover:text-white hover:bg-[#1E2638] transition cursor-pointer"
+            aria-label="Close navigation"
+          >
+            <X className="w-5 h-5" />
+          </button>
         </div>
 
         {/* Primary Action Button */}
         <div className="p-4 pb-2">
           <button
-            onClick={onOpenDispatch}
+            onClick={() => {
+              onOpenDispatch();
+              onCloseMobile?.();
+            }}
             className="w-full bg-gradient-to-r from-blue-600 via-blue-500 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-semibold py-2.5 px-3.5 rounded-xl shadow-lg shadow-blue-600/25 flex items-center justify-center gap-2 transition cursor-pointer active:scale-[0.98]"
           >
             <Play className="w-3.5 h-3.5 fill-white" />
@@ -143,7 +197,10 @@ export default function Sidebar({
                   return (
                     <button
                       key={item.id}
-                      onClick={() => setActiveTab(item.id)}
+                      onClick={() => {
+                        setActiveTab(item.id);
+                        onCloseMobile?.();
+                      }}
                       className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition cursor-pointer ${
                         isActive
                           ? 'bg-blue-600/15 text-blue-400 border border-blue-500/30 shadow-sm shadow-blue-500/10'
@@ -176,15 +233,17 @@ export default function Sidebar({
       </div>
 
       {/* Footer / System Status */}
-      <div className="p-4 border-t border-[#1E2638] space-y-3">
+      <div className="p-4 border-t border-[#1E2638] space-y-2.5">
         {/* Status Card */}
         <div className="bg-[#131722] border border-[#1E2638] rounded-xl p-3 text-[11px] space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-neutral-400 flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              API Server
+              API Backend
             </span>
-            <span className="text-[10px] text-emerald-400 font-mono font-medium">127.0.0.1:8001</span>
+            <span className="text-[10px] text-emerald-400 font-mono font-medium truncate max-w-[120px]">
+              {typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1' ? 'Online' : '127.0.0.1:8001'}
+            </span>
           </div>
 
           <div className="flex items-center justify-between text-[10px] text-neutral-400 pt-1.5 border-t border-[#1E2638]/60">
@@ -210,6 +269,20 @@ export default function Sidebar({
           </span>
           <ExternalLink className="w-3 h-3 text-neutral-400" />
         </a>
+
+        {/* Mobile Sign Out */}
+        {onLogout && (
+          <button
+            onClick={() => {
+              onLogout();
+              onCloseMobile?.();
+            }}
+            className="flex items-center justify-center gap-2 w-full px-3 py-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 hover:text-white rounded-xl border border-rose-500/20 text-xs transition cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sign out</span>
+          </button>
+        )}
       </div>
     </aside>
   );
